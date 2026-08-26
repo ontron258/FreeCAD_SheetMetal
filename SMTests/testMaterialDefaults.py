@@ -7,6 +7,11 @@ import unittest
 import FreeCAD as App
 import Part
 
+from SheetMetalBaseCmd import (
+    SMBaseBend,
+    migrateDocumentBaseBends,
+    prepareNewBaseBendPart,
+)
 from SheetMetalMaterial import (
     CONFIGURATION_VARIABLE,
     materialConfiguration,
@@ -21,6 +26,22 @@ from SheetMetalUnfoldCmd import SMUnfold
 
 
 class TestMaterialDefaults(unittest.TestCase):
+    @staticmethod
+    def _legacy_base_bend(doc, part_name, feature_name):
+        part = doc.addObject("App::Part", part_name)
+        body = doc.addObject("PartDesign::Body", part_name + "Body")
+        part.addObject(body)
+        profile = body.newObject("PartDesign::Feature", part_name + "Profile")
+        profile.Shape = Part.makePolygon(
+            [App.Vector(0, 0, 0), App.Vector(20, 0, 0)]
+        )
+        base_bend = body.newObject("PartDesign::FeaturePython", feature_name)
+        SMBaseBend(base_bend, profile)
+        base_bend.Thickness = 3.175
+        base_bend.Radius = 1.25
+        base_bend.Length = 50.0
+        return part, base_bend
+
     def test_catalog_matches_standard_gauge_tables(self):
         hrs = standardSheetMetalParameters("Hot Rolled Steel", "14 ga")
         galvanized = standardSheetMetalParameters("Galvanized Steel", "14 ga")
@@ -183,6 +204,103 @@ class TestMaterialDefaults(unittest.TestCase):
                 self.assertAlmostEqual(reopened_part.Thickness.Value, 3.175)
             finally:
                 App.closeDocument(reopened.Name)
+
+    def test_legacy_base_bend_parts_adopt_existing_geometry_as_defaults(self):
+        doc = App.newDocument("SheetMetalBaseBendMigration")
+        try:
+            pairs = [
+                self._legacy_base_bend(doc, "Part{:03d}".format(index),
+                                       "BaseBend{:03d}".format(index))
+                for index in range(3)
+            ]
+
+            migrateDocumentBaseBends(doc)
+            doc.recompute()
+
+            for part, base_bend in pairs:
+                self.assertEqual(part.SheetMetalType, "Part")
+                self.assertFalse(part.UseMaterialCatalog)
+                self.assertAlmostEqual(part.Thickness.Value, 3.175)
+                self.assertAlmostEqual(part.DefaultBendRadius.Value, 1.25)
+                self.assertTrue(base_bend.UsePartThickness)
+                self.assertTrue(base_bend.UseDefaultBendRadius)
+                self.assertEqual(base_bend.PartDefaultsVersion, 1)
+                self.assertAlmostEqual(base_bend.Thickness.Value, 3.175)
+                self.assertAlmostEqual(base_bend.Radius.Value, 1.25)
+                self.assertTrue(base_bend.Shape.isValid())
+
+            first_part, first_base = pairs[0]
+            original_volume = first_base.Shape.Volume
+            first_part.Thickness = 2.0
+            first_part.DefaultBendRadius = 2.5
+            doc.recompute()
+            self.assertAlmostEqual(first_base.Thickness.Value, 2.0)
+            self.assertAlmostEqual(first_base.Radius.Value, 2.5)
+            self.assertNotAlmostEqual(first_base.Shape.Volume, original_volume)
+
+            first_base.UseDefaultBendRadius = False
+            first_base.Radius = 4.0
+            first_part.DefaultBendRadius = 3.0
+            doc.recompute()
+            self.assertAlmostEqual(first_base.Radius.Value, 4.0)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_new_base_bend_creates_catalog_driven_sheet_metal_part(self):
+        doc = App.newDocument("SheetMetalNewBaseBendPart")
+        try:
+            profile = doc.addObject("Part::Feature", "Profile")
+            profile.Shape = Part.makePolygon(
+                [App.Vector(0, 0, 0), App.Vector(20, 0, 0)]
+            )
+            base_bend = doc.addObject("Part::FeaturePython", "BaseBend")
+            SMBaseBend(base_bend, profile)
+
+            part = prepareNewBaseBendPart(base_bend, profile)
+            doc.recompute()
+
+            self.assertEqual(part.SheetMetalType, "Part")
+            self.assertTrue(part.UseMaterialCatalog)
+            self.assertTrue(part.FollowMaterialUpgrade)
+            self.assertIs(base_bend.getParentGeoFeatureGroup(), part)
+            self.assertTrue(base_bend.UsePartThickness)
+            self.assertAlmostEqual(
+                base_bend.Thickness.Value / 25.4, 0.0747, places=7
+            )
+            self.assertAlmostEqual(
+                base_bend.Radius.Value, part.DefaultBendRadius.Value
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_new_base_bend_promotes_the_active_body_app_part(self):
+        doc = App.newDocument("SheetMetalNewBodyBaseBend")
+        try:
+            part = doc.addObject("App::Part", "Panel")
+            body = doc.addObject("PartDesign::Body", "Body")
+            part.addObject(body)
+            profile = body.newObject("PartDesign::Feature", "Profile")
+            profile.Shape = Part.makePolygon(
+                [App.Vector(0, 0, 0), App.Vector(20, 0, 0)]
+            )
+            base_bend = doc.addObject("PartDesign::FeaturePython", "BaseBend")
+            SMBaseBend(base_bend, profile)
+
+            result = prepareNewBaseBendPart(base_bend, profile, body)
+            body.addObject(base_bend)
+            doc.recompute()
+
+            self.assertIs(result, part)
+            self.assertEqual(part.SheetMetalType, "Part")
+            self.assertTrue(part.UseMaterialCatalog)
+            self.assertIs(base_bend.getParentGeoFeatureGroup(), body)
+            self.assertTrue(base_bend.UsePartThickness)
+            self.assertAlmostEqual(
+                base_bend.Thickness.Value, part.Thickness.Value
+            )
+            self.assertTrue(base_bend.Shape.isValid())
+        finally:
+            App.closeDocument(doc.Name)
 
 
 if __name__ == "__main__":

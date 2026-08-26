@@ -75,6 +75,12 @@ Keep shop-specific gauge tables and material defaults in this module rather
 than scattering nominal values through geometry commands. New Unfold objects
 inherit the owning part's K-factor as their initial manual unfold value.
 
+`SheetMetalBaseCmd.py` promotes an `App::Part` containing a legacy BaseBend to
+a Sheet Metal Part while preserving the BaseBend's existing thickness and
+radius as manual part defaults. New Make Base Wall features create or promote
+their owning Sheet Metal Part and consume its thickness. Their
+`UseDefaultBendRadius` property controls whether they consume the part radius.
+
 ### Flat-pattern workspace and DXF export
 
 `SheetMetalUnfoldCmd.py` contains the flat-pattern workflow:

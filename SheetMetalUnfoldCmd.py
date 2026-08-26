@@ -1258,7 +1258,10 @@ if SheetMetalTools.isGuiLoaded():
                 "Checkable": True,
             }
 
-        def Activated(self):
+        def Activated(self, checked=False):
+            # FreeCAD passes the requested checked state to checkable commands.
+            # The current group visibility remains the source of truth because
+            # the command can also be invoked from Python without that argument.
             doc = FreeCAD.ActiveDocument
             group = _flat_pattern_group(doc, False)
             doc.openTransaction("FlatPatternWorkspace")

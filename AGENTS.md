@@ -1,0 +1,162 @@
+# Repository Guide for Agents
+
+## Purpose and source of truth
+
+This repository is the source of truth for the FreeCAD SheetMetal workbench.
+Do not edit the installed FreeCAD addon copy and then try to reconstruct the
+change here. Make changes in this repository, test them, and deploy the changed
+files to FreeCAD only as a verification step.
+
+For the current Windows development environment:
+
+- Repository: `C:\FreeCAD\FreeCAD_SheetMetal`
+- FreeCAD installation: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311`
+- Installed addon: `C:\Users\adria\AppData\Roaming\FreeCAD\v1-1\Mod\sheetmetal`
+- Example test document: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\data\examples\Sheetmetal test.FCStd`
+
+Treat the installed addon as a deployment target. Never commit files from the
+installed addon directory.
+
+## Git workflow
+
+The remotes have distinct roles:
+
+- `origin`: `ontron258/FreeCAD_SheetMetal`, the development fork.
+- `upstream`: `shaise/FreeCAD_SheetMetal`, the official project.
+
+Branch conventions:
+
+- `master` mirrors `upstream/master`. Do not develop directly on it.
+- `dev` is the integration branch for the complete local feature set.
+- Use focused topic branches when preparing isolated upstream contributions.
+
+Keep commits cohesive and independently understandable. In particular, avoid
+mixing an isolated bug fix with a large UI or object-model change. Do not force
+push, rewrite shared history, open an upstream pull request, or merge into
+`master` unless the user explicitly asks.
+
+Before editing, inspect `git status`. Preserve unrelated user changes and never
+use destructive cleanup commands such as `git reset --hard`.
+
+## Important feature areas
+
+### Sheet Metal Face
+
+`SheetMetalShapedFlangeCmd.py` implements the sketch-driven **Face** feature.
+Its current responsibilities include:
+
+- Multiple closed regions from one or more sketches.
+- Add/subtract/ignore region operations.
+- Panels on intersecting sketch planes.
+- Automatic bends along shared collinear edges.
+- Per-feature bend radius and thickness-side settings.
+- Part-level thickness and defaults through the `Sheet Metal Part` `App::Part`.
+- Rectangle, round, and finite-kerf tear bend reliefs.
+- Cumulative feature history through `PreviousFeature`.
+
+The internal command and serialized object names still use
+`ShapedFlange` for compatibility. The user-facing command and tree labels use
+`Face`. Do not casually rename serialized properties, internal command IDs, or
+object names; saved FreeCAD documents depend on them.
+
+### Flat-pattern workspace and DXF export
+
+`SheetMetalUnfoldCmd.py` contains the flat-pattern workflow:
+
+- Actual Unfold objects stay with their owning sheet-metal parts.
+- The document-level `Flat Patterns` group contains lightweight `App::Link`
+  presentation objects.
+- The workspace toggle saves and restores formed-object visibility.
+- `AutoArrange` aligns linked flats to XY and packs them without overlap.
+- `LayoutSpacing` controls spacing; disabling `AutoArrange` preserves manual
+  link placement.
+- DXF export uses explicit `CUT`, `BEND`, `INTERNAL`, `BEND_LABEL`, and
+  `BEND_CUT` layers.
+
+Workspace link placement is presentation state. Manufacturing export and future
+drawings should reference the real Unfold geometry, not the arranged links.
+
+### Shared helpers
+
+`SheetMetalTools.py` is widely used by the workbench. Keep changes there small
+and backward compatible. A change to a shared function must retain existing
+call signatures unless every caller and migration path has been checked.
+
+## FreeCAD object-model rules
+
+- Keep one sheet thickness at the `Sheet Metal Part` level. Different parts in
+  the same document may have different thicknesses.
+- A Face history may use profiles directly in one `App::Part` or inside one
+  `PartDesign::Body`; do not mix scopes within a single history.
+- Avoid cyclic links between an `App::Part` and its children. The current part
+  `Tip` is stored as an internal object-name string for this reason.
+- Each later Face feature owns the bends it introduces and may use its own bend
+  radius and relief configuration.
+- Preserve migration behavior for dynamic properties and enumeration options.
+- Validate BRep results with `Shape.isValid()` and confirm that the result is a
+  single connected solid when that is a feature requirement.
+
+## Editing conventions
+
+- Follow the existing Python style and license headers.
+- Use `FreeCAD.Qt.translate` for user-facing strings.
+- Add new commands to `InitGui.py` and register new test modules in
+  `TestSheetMetal.py`.
+- Put focused regression tests in `SMTests/`.
+- Reuse the workbench's existing property helpers and task-panel binding helpers
+  where practical.
+- Preserve line endings and avoid mechanical rewrites of unrelated files.
+- Do not modify or save the user's `.FCStd` documents during automated tests.
+
+## Testing
+
+Use FreeCAD's bundled Python, not a system Python. The current interpreter is:
+
+```powershell
+$sheetMetalPython = 'C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\bin\python.exe'
+& $sheetMetalPython -m unittest SMTests.testFlatPatternWorkspace SMTests.testShapedFlange SMTests.testFolder SMTests.testKfactor
+```
+
+FreeCAD may put the installed addon directory ahead of the repository on
+`sys.path`. Before running integration tests, deploy every changed Python module
+and test module to the installed addon, or otherwise verify the imported module
+paths. A passing test against stale installed code is not evidence that the
+repository change works.
+
+For geometry changes, verification should normally include:
+
+1. Python syntax/compile validation.
+2. Focused unit tests for the changed geometry.
+3. The full SheetMetal test selection above.
+4. Valid-solid and expected-volume/topology assertions where applicable.
+5. An in-memory open/recompute of the example document for saved-object
+   compatibility. Close it without saving.
+6. Unfold validation when a change affects bends, reliefs, thickness, or
+   cumulative Face history.
+
+FreeCAD must be restarted after deploying Python command modules because an
+already imported workbench will continue using the old module objects.
+
+## Deploying to the local FreeCAD addon
+
+Deploy only files changed by the current work. Preserve unrelated files in the
+installed addon and do not mirror-delete the directory. After copying, compare
+SHA-256 hashes between repository and installed copies, then restart FreeCAD.
+
+The repository must remain cleanly reproducible without relying on uncommitted
+changes in the installed addon.
+
+## Preparing upstream contributions
+
+Prefer small, reviewable changes:
+
+- DXF correctness fixes should remain separable from workspace UI changes.
+- Flat-pattern workspace behavior should remain separable from automatic
+  packing policy.
+- The Face feature, part defaults, and bend-relief model may be proposed as a
+  coherent feature stack, but document serialization and migration behavior.
+
+Before proposing a large architecture change upstream, start a design
+discussion. Add documentation and tests expected by the official project, and
+rebase the topic branch onto current `upstream/master`. Keep the full local
+feature set on `dev` even when only selected commits are offered upstream.

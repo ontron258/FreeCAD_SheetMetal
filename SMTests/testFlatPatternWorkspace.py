@@ -7,10 +7,34 @@ import unittest
 import FreeCAD as App
 import Part
 
-from SheetMetalUnfoldCmd import arrangeFlatPatternLinks, smExportLayeredUnfoldDXF
+from SheetMetalUnfoldCmd import (
+    _isUnfoldObject,
+    arrangeFlatPatternLinks,
+    smExportLayeredUnfoldDXF,
+)
 
 
 class TestFlatPatternWorkspace(unittest.TestCase):
+    def test_flat_pattern_links_are_not_treated_as_unfold_objects(self):
+        doc = App.newDocument("FlatPatternLinkDiscovery")
+        try:
+            unfold = doc.addObject("Part::Feature", "Unfold")
+            unfold.addProperty("App::PropertyString", "baseObject")
+            unfold.addProperty("App::PropertyStringList", "UnfoldSketches")
+            unfold.baseObject = "Face1"
+            unfold.UnfoldSketches = []
+
+            link = doc.addObject("App::Link", "FlatPattern")
+            link.LinkedObject = unfold
+            doc.recompute()
+
+            self.assertTrue(hasattr(link, "baseObject"))
+            self.assertTrue(hasattr(link, "UnfoldSketches"))
+            self.assertTrue(_isUnfoldObject(unfold))
+            self.assertFalse(_isUnfoldObject(link))
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_dxf_export_uses_explicit_cut_and_bend_layers(self):
         doc = App.newDocument("FlatPatternDXFLayers")
         output_path = os.path.join(tempfile.gettempdir(), "sheetmetal-layer-test.dxf")

@@ -277,6 +277,21 @@ def arrangeFlatPatternLinks(links, spacing=10.0):
     return placements
 
 
+def _isUnfoldObject(obj):
+    """Return True only for real Unfold features, never presentation links.
+
+    App::Link forwards properties from its target.  Duck-typing only for
+    ``baseObject`` and ``UnfoldSketches`` therefore makes a flat-pattern link
+    look like another Unfold and causes a new link-to-link object on every
+    workspace activation.
+    """
+    return (
+        obj.TypeId != "App::Link"
+        and hasattr(obj, "baseObject")
+        and hasattr(obj, "UnfoldSketches")
+    )
+
+
 ###################################################################################################
 # Object class
 ###################################################################################################
@@ -988,10 +1003,7 @@ if SheetMetalTools.isGuiLoaded():
 
 
     def _unfold_objects(doc):
-        return [
-            obj for obj in doc.Objects
-            if hasattr(obj, "baseObject") and hasattr(obj, "UnfoldSketches")
-        ]
+        return [obj for obj in doc.Objects if _isUnfoldObject(obj)]
 
 
     def _flat_pattern_group(doc, create=False):
@@ -1032,6 +1044,8 @@ if SheetMetalTools.isGuiLoaded():
 
 
     def _flat_pattern_link(unfold_obj, create=False):
+        if not _isUnfoldObject(unfold_obj):
+            return None
         group = _flat_pattern_group(unfold_obj.Document, create)
         if group is None:
             return None
@@ -1233,7 +1247,8 @@ if SheetMetalTools.isGuiLoaded():
         def GetResources(self):
             return {
                 "Pixmap": os.path.join(
-                    SheetMetalTools.icons_path, "SheetMetal_Unfold.svg"
+                    SheetMetalTools.icons_path,
+                    "SheetMetal_FlatPatternWorkspace.svg",
                 ),
                 "MenuText": translate("SheetMetal", "Toggle Flat Pattern Workspace"),
                 "ToolTip": translate(

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="formed" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#729fcf"/>
+      <stop offset="1" stop-color="#204a87"/>
+    </linearGradient>
+    <linearGradient id="flat" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8ae234"/>
+      <stop offset="1" stop-color="#4e9a06"/>
+    </linearGradient>
+  </defs>
+  <path d="M5 13h20v13H12v22H5z" fill="url(#formed)" stroke="#0b2545" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M39 18h20v29H39z" fill="url(#flat)" stroke="#285000" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M27 19h9" fill="none" stroke="#f57900" stroke-width="4" stroke-linecap="round"/>
+  <path d="m33 14 6 5-6 5" fill="none" stroke="#f57900" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M37 43h-9" fill="none" stroke="#f57900" stroke-width="4" stroke-linecap="round"/>
+  <path d="m31 38-6 5 6 5" fill="none" stroke="#f57900" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M9 27h16" fill="none" stroke="#ef2929" stroke-width="2" stroke-dasharray="3 3"/>
+</svg>

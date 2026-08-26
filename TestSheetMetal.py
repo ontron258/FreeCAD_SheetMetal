@@ -23,5 +23,6 @@
 import TestApp
 
 from SMTests.testFolder import TestFolder
+from SMTests.testFlatPatternWorkspace import TestFlatPatternWorkspace
 from SMTests.testKfactor import TestKFactor
 from SMTests.testShapedFlange import TestShapedFlange

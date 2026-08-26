@@ -23,6 +23,7 @@
 #
 ########################################################################
 
+import math
 import os
 import sys
 
@@ -118,7 +119,162 @@ def smUnfoldExportSketches(obj, useDialog=True):
     exptype = obj.Proxy.ExportType
     expname = obj.Label.removesuffix("_Unfold")
     filename = f"{FreeCAD.ActiveDocument.Name}-{expname}.{exptype}"
-    SheetMetalTools.smGuiExportSketch(sketches, exptype, filename, useDialog)
+    if exptype == "dxf":
+        smExportLayeredUnfoldDXF(sketches, filename, useDialog)
+    else:
+        SheetMetalTools.smGuiExportSketch(sketches, exptype, filename, useDialog)
+
+
+def _unfoldDXFLayerName(sketch):
+    """Map generated Unfold sketch roles to manufacturing DXF layers."""
+    name = "{} {}".format(sketch.Name, sketch.Label).lower()
+    if "bendcuts" in name or "bend_cuts" in name:
+        return "BEND_CUT"
+    if "bend_labels" in name or "bendlabels" in name:
+        return "BEND_LABEL"
+    if "_bends" in name or name.endswith(" bends"):
+        return "BEND"
+    if "internal" in name:
+        return "INTERNAL"
+    # The main/outline sketch and hole sketch are both cutting profiles.
+    return "CUT"
+
+
+def smExportLayeredUnfoldDXF(sketches, filename, useDialog=True):
+    """Export Unfold geometry on explicit DXF layers without dirtying the model."""
+    if not sketches:
+        return
+    source_doc = sketches[0].Document
+    source_file = source_doc.FileName
+    source_name = source_doc.Name
+    export_doc = FreeCAD.newDocument("SheetMetalDXFExport")
+    export_objects = []
+    try:
+        layer_shapes = {}
+        for sketch in sketches:
+            layer_name = _unfoldDXFLayerName(sketch)
+            shape = sketch.Shape.copy()
+            if hasattr(sketch, "getGlobalPlacement"):
+                shape.Placement = sketch.getGlobalPlacement().multiply(shape.Placement)
+            else:
+                shape.Placement = sketch.Placement.multiply(shape.Placement)
+            layer_shapes.setdefault(layer_name, []).append(shape)
+
+        for layer_name, shapes in layer_shapes.items():
+            layer = export_doc.addObject(
+                "App::DocumentObjectGroup", "DXF_{}".format(layer_name)
+            )
+            layer.Label = layer_name
+            # The current C++ DXF exporter uses the internal object name as
+            # its layer; the legacy Python exporter uses the group label.
+            geometry = export_doc.addObject("Part::Feature", layer_name)
+            geometry.Label = layer_name
+            geometry.Shape = Part.makeCompound(shapes)
+            layer.addObject(geometry)
+            export_objects.append(geometry)
+        export_doc.recompute()
+        if hasattr(SheetMetalTools, "smGuiExportSketch"):
+            SheetMetalTools.smGuiExportSketch(
+                export_objects,
+                "dxf",
+                filename,
+                useDialog,
+                sourceFile=source_file,
+            )
+        elif not useDialog:
+            import importDXF
+
+            importDXF.export(export_objects, filename)
+    finally:
+        FreeCAD.closeDocument(export_doc.Name)
+        if FreeCAD.getDocument(source_name) is not None:
+            FreeCAD.setActiveDocument(source_name)
+
+
+def arrangeFlatPatternLinks(links, spacing=10.0):
+    """Align linked flat solids to XY and pack their bounding boxes in rows.
+
+    Only App::Link placements are changed; the source Unfold objects retain
+    their modeling placements. Every item rests at Z=0, so different sheet
+    thicknesses naturally produce different top elevations.
+    """
+    spacing = max(0.0, float(spacing))
+    items = []
+    documents = set()
+    z_axis = FreeCAD.Vector(0.0, 0.0, 1.0)
+
+    for link in links:
+        if link is None or link.LinkedObject is None:
+            continue
+        documents.add(link.Document)
+        if hasattr(link, "LinkTransform"):
+            link.LinkTransform = False
+        link.Placement = FreeCAD.Placement()
+        link.Document.recompute()
+        planar_faces = [
+            face for face in link.Shape.Faces
+            if isinstance(face.Surface, Part.Plane)
+        ]
+        if not planar_faces:
+            continue
+        reference_face = max(planar_faces, key=lambda face: face.Area)
+        normal = reference_face.normalAt(0.0, 0.0)
+        if normal.Length <= SheetMetalTools.smEpsilon:
+            continue
+        normal.normalize()
+        rotation = FreeCAD.Rotation(normal, z_axis)
+        link.Placement = FreeCAD.Placement(FreeCAD.Vector(), rotation)
+        link.Document.recompute()
+        bounds = link.Shape.BoundBox
+        items.append(
+            {
+                "link": link,
+                "rotation": rotation,
+                "bounds": bounds,
+                "width": bounds.XLength,
+                "height": bounds.YLength,
+            }
+        )
+
+    if not items:
+        return []
+
+    # A compact deterministic shelf layout. Sorting tall items first avoids
+    # many poor row breaks while keeping the algorithm predictable and fast.
+    items.sort(key=lambda item: (-item["height"], -item["width"], item["link"].Name))
+    packed_area = sum(
+        (item["width"] + spacing) * (item["height"] + spacing)
+        for item in items
+    )
+    row_limit = max(
+        max(item["width"] for item in items),
+        math.sqrt(packed_area) * 1.35,
+    )
+    cursor_x = 0.0
+    cursor_y = 0.0
+    row_height = 0.0
+    placements = []
+    for item in items:
+        width = item["width"]
+        height = item["height"]
+        if cursor_x > 0.0 and cursor_x + width > row_limit:
+            cursor_x = 0.0
+            cursor_y += row_height + spacing
+            row_height = 0.0
+        bounds = item["bounds"]
+        base = FreeCAD.Vector(
+            cursor_x - bounds.XMin,
+            cursor_y - bounds.YMin,
+            -bounds.ZMin,
+        )
+        item["link"].Placement = FreeCAD.Placement(base, item["rotation"])
+        placements.append(item["link"])
+        cursor_x += width + spacing
+        row_height = max(row_height, height)
+
+    for document in documents:
+        document.recompute()
+    return placements
 
 
 ###################################################################################################
@@ -726,11 +882,13 @@ if SheetMetalTools.isGuiLoaded():
             self.obj.ViewObject.Transparency = self.obj.Proxy.UnfoldTransparency
             SheetMetalTools.taskSaveDefaults(self.obj, smUnfoldDefaultVars)
             SheetMetalTools.taskSaveDefaults(self.obj.Proxy, smUnfoldNonSavedDefaultVars)
+            _show_flat_pattern_workspace(self.obj.Document, capture=False)
             # self._updateSelectedMds()
             # kFactorTable = self.getKFactorTable()
             return None
 
         def reject(self):
+            _show_formed_workspace(self.obj.Document)
             FreeCAD.ActiveDocument.abortTransaction()
             Gui.Control.closeDialog()
             FreeCAD.ActiveDocument.recompute()
@@ -810,6 +968,144 @@ if SheetMetalTools.isGuiLoaded():
     # Commands
     ###############################################################################################
 
+    def _containing_app_part(obj):
+        """Return the App::Part that owns an object, including through a Body."""
+        current = obj
+        while current is not None:
+            current = (
+                current.getParentGeoFeatureGroup()
+                or current.getParentGroup()
+            )
+            if current is not None and current.TypeId == "App::Part":
+                return current
+        return None
+
+
+    def _place_unfold_in_source_part(new_obj, source_obj):
+        owner_part = _containing_app_part(source_obj)
+        if owner_part is not None:
+            owner_part.addObject(new_obj)
+
+
+    def _unfold_objects(doc):
+        return [
+            obj for obj in doc.Objects
+            if hasattr(obj, "baseObject") and hasattr(obj, "UnfoldSketches")
+        ]
+
+
+    def _flat_pattern_group(doc, create=False):
+        group = doc.getObject("FlatPatterns")
+        if group is None and create:
+            group = doc.addObject("App::DocumentObjectGroup", "FlatPatterns")
+            group.Label = translate("SheetMetal", "Flat Patterns")
+            group.addProperty(
+                "App::PropertyString", "WorkspaceType", "Flat Patterns",
+                translate("App::Property", "Document view workspace type"),
+            ).WorkspaceType = "FlatPatterns"
+            group.setEditorMode("WorkspaceType", 1)
+            group.addProperty(
+                "App::PropertyStringList", "PreviousVisibility", "Flat Patterns",
+                translate("App::Property", "Visibility state restored in formed view"),
+            )
+            group.setEditorMode("PreviousVisibility", 2)
+            group.ViewObject.Visibility = False
+        if group is not None:
+            SheetMetalTools.smAddBoolProperty(
+                group,
+                "AutoArrange",
+                translate(
+                    "App::Property",
+                    "Align flat patterns to XY and pack them without overlap",
+                ),
+                True,
+                "Flat Pattern Layout",
+            )
+            SheetMetalTools.smAddLengthProperty(
+                group,
+                "LayoutSpacing",
+                translate("App::Property", "Spacing between arranged flat patterns"),
+                10.0,
+                "Flat Pattern Layout",
+            )
+        return group
+
+
+    def _flat_pattern_link(unfold_obj, create=False):
+        group = _flat_pattern_group(unfold_obj.Document, create)
+        if group is None:
+            return None
+        for candidate in group.Group:
+            if candidate.TypeId == "App::Link" and candidate.LinkedObject is unfold_obj:
+                return candidate
+        if not create:
+            return None
+        link = unfold_obj.Document.addObject("App::Link", "FlatPattern")
+        link.LinkedObject = unfold_obj
+        owner_part = _containing_app_part(unfold_obj)
+        owner_label = owner_part.Label if owner_part is not None else unfold_obj.Label
+        link.Label = translate("SheetMetal", "%1 Flat Pattern").replace(
+            "%1", owner_label
+        )
+        group.addObject(link)
+        link.ViewObject.Visibility = False
+        return link
+
+
+    def _capture_formed_visibility(doc, excluded=None):
+        group = _flat_pattern_group(doc, True)
+        excluded = set(excluded or [])
+        flat_members = set(group.Group)
+        entries = []
+        for obj in doc.Objects:
+            if obj is group or obj in flat_members or obj in excluded:
+                continue
+            if hasattr(obj, "ViewObject"):
+                entries.append(
+                    "{}={}".format(obj.Name, int(obj.ViewObject.Visibility))
+                )
+        group.PreviousVisibility = entries
+        return group
+
+
+    def _show_flat_pattern_workspace(doc, capture=True, excluded=None):
+        group = _flat_pattern_group(doc, True)
+        links = [
+            _flat_pattern_link(unfold_obj, True)
+            for unfold_obj in _unfold_objects(doc)
+        ]
+        if group.AutoArrange:
+            arrangeFlatPatternLinks(links, group.LayoutSpacing.Value)
+        if capture:
+            _capture_formed_visibility(doc, excluded)
+        flat_members = set(group.Group)
+        for obj in doc.Objects:
+            if obj is group or obj in flat_members:
+                continue
+            if hasattr(obj, "ViewObject"):
+                obj.ViewObject.Visibility = False
+        group.ViewObject.Visibility = True
+        for link in links:
+            link.ViewObject.Visibility = True
+        Gui.activeDocument().activeView().fitAll()
+
+
+    def _show_formed_workspace(doc):
+        group = _flat_pattern_group(doc, False)
+        if group is None:
+            return
+        group.ViewObject.Visibility = False
+        for member in group.Group:
+            member.ViewObject.Visibility = False
+        for unfold_obj in _unfold_objects(doc):
+            unfold_obj.ViewObject.Visibility = False
+        for entry in group.PreviousVisibility:
+            name, separator, value = entry.partition("=")
+            obj = doc.getObject(name)
+            if separator and obj is not None and hasattr(obj, "ViewObject"):
+                obj.ViewObject.Visibility = value == "1"
+        Gui.activeDocument().activeView().fitAll()
+
     class SMUnfoldCommandClass:
         """Unfold object."""
 
@@ -840,7 +1136,10 @@ if SheetMetalTools.isGuiLoaded():
             if newObj is None:
                 return
             newObj.Label = label
+            _capture_formed_visibility(newObj.Document, [newObj])
+            _place_unfold_in_source_part(newObj, selobj)
             SMUnfold(newObj, selobj, sel.SubElementNames)
+            _flat_pattern_link(newObj, True)
             SMUnfoldViewProvider(newObj.ViewObject)
             SheetMetalTools.smAddNewObject(selobj, newObj, activeBody, SMUnfoldTaskPanel)
 
@@ -910,10 +1209,13 @@ if SheetMetalTools.isGuiLoaded():
             if newObj is None:
                 return
             newObj.Label = label
+            _capture_formed_visibility(newObj.Document, [newObj])
+            _place_unfold_in_source_part(newObj, selobj)
             SMUnfold(newObj, selobj, sel.SubElementNames)
+            _flat_pattern_link(newObj, True)
             SMUnfoldViewProvider(newObj.ViewObject)
             SheetMetalTools.smAddNewObject(selobj, newObj, activeBody)
-            selobj.Visibility = True
+            _show_flat_pattern_workspace(newObj.Document, capture=False)
             return
 
         def IsActive(self):
@@ -925,6 +1227,49 @@ if SheetMetalTools.isGuiLoaded():
             return isinstance(selFace.Surface, Part.Plane)
 
 
+    class SMToggleFlatPatternWorkspaceCommandClass:
+        """Switch between the saved formed view and linked flat patterns."""
+
+        def GetResources(self):
+            return {
+                "Pixmap": os.path.join(
+                    SheetMetalTools.icons_path, "SheetMetal_Unfold.svg"
+                ),
+                "MenuText": translate("SheetMetal", "Toggle Flat Pattern Workspace"),
+                "ToolTip": translate(
+                    "SheetMetal",
+                    "Show only linked flat patterns, or restore the previous formed view.",
+                ),
+                "Checkable": True,
+            }
+
+        def Activated(self):
+            doc = FreeCAD.ActiveDocument
+            group = _flat_pattern_group(doc, False)
+            doc.openTransaction("FlatPatternWorkspace")
+            if group is not None and group.ViewObject.Visibility:
+                _show_formed_workspace(doc)
+            else:
+                _show_flat_pattern_workspace(doc)
+            doc.commitTransaction()
+
+        def IsActive(self):
+            return (
+                FreeCAD.ActiveDocument is not None
+                and bool(_unfold_objects(FreeCAD.ActiveDocument))
+            )
+
+        def IsChecked(self):
+            if FreeCAD.ActiveDocument is None:
+                return False
+            group = _flat_pattern_group(FreeCAD.ActiveDocument, False)
+            return group is not None and group.ViewObject.Visibility
+
+
     Gui.addCommand("SheetMetal_UnattendedUnfold", SMUnfoldUnattendedCommandClass())
     Gui.addCommand("SheetMetal_Unfold", SMUnfoldCommandClass())
     Gui.addCommand("SheetMetal_UnfoldUpdate", SMRecomputeUnfoldsCommandClass())
+    Gui.addCommand(
+        "SheetMetal_ToggleFlatPatternWorkspace",
+        SMToggleFlatPatternWorkspaceCommandClass(),
+    )

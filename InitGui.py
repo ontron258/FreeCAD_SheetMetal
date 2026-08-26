@@ -73,12 +73,14 @@ class SMWorkbench(Workbench):
         import SheetMetalUnfolder
         import SketchOnSheetMetalCmd
         import SheetMetalSketch
+        import SheetMetalShapedFlangeCmd
         import SheetMetalFromSolid
 
         self.list = [
             "SheetMetal_BaseShape",
             "SheetMetal_NewSketch",
             "SheetMetal_AddBase",
+            "SheetMetal_ShapedFlange",
             "SheetMetal_FromSolid",
             "SheetMetal_AddWall",
             "SheetMetal_AddHem",
@@ -86,6 +88,7 @@ class SMWorkbench(Workbench):
             "SheetMetal_ExtendBySketch",
             "SheetMetal_AddFoldWall",
             "SheetMetal_Unfold",
+            "SheetMetal_ToggleFlatPatternWorkspace",
             "SheetMetal_UnfoldUpdate",
             "SheetMetal_AddCornerRelief",
             "SheetMetal_AddRelief",

@@ -819,8 +819,12 @@ if isGuiLoaded():
         return forms
 
 
-    def smGuiExportSketch(sketches, fileType, fileName, useDialog=True):
-        activeFile = FreeCAD.ActiveDocument.FileName
+    def smGuiExportSketch(
+        sketches, fileType, fileName, useDialog=True, sourceFile=None
+    ):
+        activeFile = (
+            sourceFile if sourceFile is not None else FreeCAD.ActiveDocument.FileName
+        )
         if activeFile in smExportDirs:
             fileName = os.path.join(smExportDirs[activeFile], fileName)
         else:

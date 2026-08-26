@@ -387,6 +387,7 @@ class TestShapedFlange(unittest.TestCase):
         doc = App.newDocument("ShapedFlangeFeatureHistory")
         try:
             sheet_part = createSheetMetalPart(doc)
+            sheet_part.UseMaterialCatalog = False
             sheet_part.Thickness = 2.0
             sheet_part.DefaultBendRadius = 2.0
 
@@ -448,6 +449,7 @@ class TestShapedFlange(unittest.TestCase):
             path = os.path.join(temp_dir, "ShapedFlangeHistory.FCStd")
             doc = App.newDocument("ShapedFlangePersistence")
             sheet_part = createSheetMetalPart(doc)
+            sheet_part.UseMaterialCatalog = False
             sheet_part.Thickness = 2.0
             profile = doc.addObject("Part::Feature", "Profile")
             profile.Shape = Part.makePolygon(

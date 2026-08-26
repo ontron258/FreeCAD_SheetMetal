@@ -59,6 +59,22 @@ The internal command and serialized object names still use
 `Face`. Do not casually rename serialized properties, internal command IDs, or
 object names; saved FreeCAD documents depend on them.
 
+### Material defaults and product upgrades
+
+`SheetMetalMaterial.py` owns the material catalog and part-level material
+policy. New sheet-metal parts use catalog-driven thickness, bend radius, and
+K-factor values. Existing saved parts migrate conservatively to manual mode.
+
+The document-level `SheetMetalConfiguration` is an `App::VarSet`; its
+`MaterialUpgrade` property is the predefined product configuration variable.
+Parts follow it only when `FollowMaterialUpgrade` is enabled. A fixed stainless
+part should therefore use `BaseMaterial = Stainless Steel` with
+`FollowMaterialUpgrade = false`.
+
+Keep shop-specific gauge tables and material defaults in this module rather
+than scattering nominal values through geometry commands. New Unfold objects
+inherit the owning part's K-factor as their initial manual unfold value.
+
 ### Flat-pattern workspace and DXF export
 
 `SheetMetalUnfoldCmd.py` contains the flat-pattern workflow:
@@ -114,7 +130,7 @@ Use FreeCAD's bundled Python, not a system Python. The current interpreter is:
 
 ```powershell
 $sheetMetalPython = 'C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\bin\python.exe'
-& $sheetMetalPython -m unittest SMTests.testFlatPatternWorkspace SMTests.testShapedFlange SMTests.testFolder SMTests.testKfactor
+& $sheetMetalPython -m unittest SMTests.testMaterialDefaults SMTests.testFlatPatternWorkspace SMTests.testShapedFlange SMTests.testFolder SMTests.testKfactor
 ```
 
 FreeCAD may put the installed addon directory ahead of the repository on

@@ -25,6 +25,7 @@ import os
 import FreeCAD
 import Part
 
+import SheetMetalMaterial
 import SheetMetalTools
 
 
@@ -776,6 +777,8 @@ def addSheetMetalPartProperties(part):
             ),
         )
     part.setEditorMode("Tip", 1)
+    SheetMetalMaterial.addMaterialProperties(part)
+    SheetMetalMaterial.applyMaterialDefaults(part)
 
 
 def createSheetMetalPart(doc):
@@ -786,6 +789,7 @@ def createSheetMetalPart(doc):
         part,
         ["Thickness", ("DefaultBendRadius", "defaultBendRadius")],
     )
+    SheetMetalMaterial.configureNewPart(part)
     return part
 
 
@@ -866,6 +870,7 @@ def upgradeSheetMetalPart(part):
         "DefaultReliefDepth": part.DefaultReliefDepth.Value,
         "KFactor": float(part.KFactor),
     }
+    material_values = SheetMetalMaterial.materialPropertyValues(part)
 
     profile_roots = []
     for child in ordered_children:
@@ -892,6 +897,7 @@ def upgradeSheetMetalPart(part):
     addSheetMetalPartProperties(replacement)
     for prop, value in values.items():
         setattr(replacement, prop, value)
+    SheetMetalMaterial.restoreMaterialPropertyValues(replacement, material_values)
     for root in profile_roots:
         replacement.addObject(root)
     for child in ordered_children:

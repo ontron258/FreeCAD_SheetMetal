@@ -32,6 +32,7 @@ import Part
 
 import SheetMetalBendCuts
 import SheetMetalKfactor
+import SheetMetalMaterial
 import SheetMetalTools
 import SheetMetalUnfolder
 from engineering_mode import engineering_mode_enabled
@@ -310,6 +311,9 @@ class SMUnfold:
         )
         self.addVerifyProperties(obj)
         SheetMetalTools.taskRestoreDefaults(obj, smUnfoldDefaultVars)
+        sheet_metal_part = SheetMetalMaterial.findSheetMetalPart(selobj)
+        if sheet_metal_part is not None and hasattr(sheet_metal_part, "KFactor"):
+            obj.KFactor = float(sheet_metal_part.KFactor)
         # Setup transient properties.
         self.SketchColor = GENSKETCHCOLOR
         self.InternalColor = OUTLINESKETCHCOLOR

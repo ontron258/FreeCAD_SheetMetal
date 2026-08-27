@@ -9,6 +9,7 @@ import FreeCAD as App
 import Part
 
 from SheetMetalShapedFlangeCmd import (
+    FACE_GEOMETRY_VERSION,
     SMShapedFlange,
     _adopt_profiles,
     _part_tip_feature,
@@ -16,6 +17,7 @@ from SheetMetalShapedFlangeCmd import (
     createSheetMetalPart,
     makeShapedFlange,
     makeShapedFlangeStages,
+    migrateDocumentFaceGeometry,
     upgradeSheetMetalPart,
 )
 
@@ -42,6 +44,39 @@ def _multi_loop_sketch(label, loops):
 
 
 class TestShapedFlange(unittest.TestCase):
+    def test_saved_face_geometry_version_triggers_rebuild_migration(self):
+        doc = App.newDocument("ShapedFlangeGeometryMigration")
+        try:
+            part = createSheetMetalPart(doc)
+            profile = doc.addObject("Part::Feature", "Profile")
+            profile.Shape = Part.makePolygon(
+                [App.Vector(0, 0, 0), App.Vector(10, 0, 0),
+                 App.Vector(10, 10, 0), App.Vector(0, 10, 0),
+                 App.Vector(0, 0, 0)]
+            )
+            part.addObject(profile)
+            feature = doc.addObject("Part::FeaturePython", "ShapedFlange")
+            SMShapedFlange(feature, [profile], part)
+            part.addObject(feature)
+            part.Tip = feature.Name
+            doc.recompute()
+            self.assertEqual(
+                feature.FaceGeometryVersion, FACE_GEOMETRY_VERSION
+            )
+
+            feature.removeProperty("FaceGeometryVersion")
+            migrated = migrateDocumentFaceGeometry(doc)
+
+            self.assertEqual(migrated, [feature])
+            self.assertIn("Touched", feature.State)
+            doc.recompute()
+            self.assertEqual(
+                feature.FaceGeometryVersion, FACE_GEOMETRY_VERSION
+            )
+            self.assertTrue(feature.Shape.isValid())
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_saved_relief_enums_gain_tear_without_changing_selection(self):
         doc = App.newDocument("ShapedFlangeReliefEnumMigration")
         try:

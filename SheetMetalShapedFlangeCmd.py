@@ -36,6 +36,7 @@ smEpsilon = SheetMetalTools.smEpsilon
 
 smShapedFlangeDefaultVars = ["BendRadius"]
 RELIEF_TYPES = ["None", "Tear", "Rectangle", "Round"]
+FACE_GEOMETRY_VERSION = 1
 
 
 def _ensure_enumeration_options(obj, property_name, options, default):
@@ -1236,6 +1237,17 @@ class SMShapedFlange:
         obj.Proxy = self
 
     def addVerifyProperties(self, obj):
+        if "FaceGeometryVersion" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyInteger",
+                "FaceGeometryVersion",
+                "Face Parameters",
+                translate(
+                    "App::Property",
+                    "Internal Face geometry migration version",
+                ),
+            ).FaceGeometryVersion = 0
+        obj.setEditorMode("FaceGeometryVersion", 1)
         if "ThicknessSide" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyEnumeration",
@@ -1314,11 +1326,32 @@ class SMShapedFlange:
                     "" if index == 0 else "{:03d}".format(index)
                 )
         stages = [_stage_from_feature(feature) for feature in history]
-        fp.Shape = makeShapedFlangeStages(
+        result = makeShapedFlangeStages(
             stages,
             thickness=sheet_metal_part.Thickness.Value,
             refine=fp.Refine,
         )
+        fp.Shape = result
+        fp.FaceGeometryVersion = FACE_GEOMETRY_VERSION
+
+
+def migrateDocumentFaceGeometry(doc):
+    """Mark Face features made by older geometry builders for recompute."""
+    migrated = []
+    for obj in doc.Objects:
+        if not (
+            hasattr(obj, "SheetMetalType") and obj.SheetMetalType == "Face"
+        ):
+            continue
+        proxy = getattr(obj, "Proxy", None)
+        if proxy is not None and hasattr(proxy, "addVerifyProperties"):
+            proxy.addVerifyProperties(obj)
+        else:
+            SMShapedFlange.addVerifyProperties(None, obj)
+        if obj.FaceGeometryVersion < FACE_GEOMETRY_VERSION:
+            obj.touch()
+            migrated.append(obj)
+    return migrated
 
 
 class _SheetMetalPartDefaultsObserver:
@@ -1331,6 +1364,9 @@ class _SheetMetalPartDefaultsObserver:
         "DefaultReliefWidth",
         "DefaultReliefDepth",
     }
+
+    def slotActivateDocument(self, doc):
+        migrateDocumentFaceGeometry(doc)
 
     def slotChangedObject(self, obj, prop):
         if prop not in self.geometry_properties or not (
@@ -1353,6 +1389,8 @@ class _SheetMetalPartDefaultsObserver:
 if "_sheet_metal_part_defaults_observer" not in globals():
     _sheet_metal_part_defaults_observer = _SheetMetalPartDefaultsObserver()
     FreeCAD.addDocumentObserver(_sheet_metal_part_defaults_observer)
+    for _open_document in FreeCAD.listDocuments().values():
+        migrateDocumentFaceGeometry(_open_document)
 
 
 if SheetMetalTools.isGuiLoaded():

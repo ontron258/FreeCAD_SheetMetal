@@ -804,6 +804,17 @@ def createSheetMetalPart(doc):
     return part
 
 
+def promoteNewSheetMetalPart(part):
+    """Initialize an ordinary App::Part selected for its first Face feature."""
+    was_sheet_metal = (
+        hasattr(part, "SheetMetalType") and part.SheetMetalType == "Part"
+    )
+    addSheetMetalPartProperties(part)
+    if not was_sheet_metal:
+        SheetMetalMaterial.configureNewPart(part)
+    return part
+
+
 def _parent_container(obj):
     """Return the nearest tree/geometry container of an object."""
     return obj.getParentGeoFeatureGroup() or obj.getParentGroup()
@@ -1454,7 +1465,7 @@ if SheetMetalTools.isGuiLoaded():
                     }
                     if len(profile_parts) == 1:
                         sheet_part = profile_parts.pop()
-                        addSheetMetalPartProperties(sheet_part)
+                        promoteNewSheetMetalPart(sheet_part)
                     elif len(profile_parts) > 1:
                         doc.abortTransaction()
                         SheetMetalTools.smWarnDialog(
@@ -1467,7 +1478,7 @@ if SheetMetalTools.isGuiLoaded():
                     else:
                         sheet_part = createSheetMetalPart(doc)
             else:
-                addSheetMetalPartProperties(sheet_part)
+                promoteNewSheetMetalPart(sheet_part)
 
             try:
                 sheet_part = upgradeSheetMetalPart(sheet_part)

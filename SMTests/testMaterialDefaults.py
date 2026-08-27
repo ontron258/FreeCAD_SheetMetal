@@ -21,6 +21,7 @@ from SheetMetalShapedFlangeCmd import (
     SMShapedFlange,
     addSheetMetalPartProperties,
     createSheetMetalPart,
+    promoteNewSheetMetalPart,
 )
 from SheetMetalUnfoldCmd import SMUnfold
 
@@ -83,6 +84,44 @@ class TestMaterialDefaults(unittest.TestCase):
                 fixed_stainless.Thickness.Value / 25.4, 0.0781, places=7
             )
             self.assertAlmostEqual(float(fixed_stainless.KFactor), 0.45)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_document_defaults_seed_new_sheet_metal_parts(self):
+        doc = App.newDocument("SheetMetalDocumentDefaults")
+        try:
+            config = materialConfiguration(doc, True)
+            config.DefaultBaseMaterial = "Galvanized Steel"
+            config.DefaultSheetSize = "16 ga"
+
+            part = createSheetMetalPart(doc)
+
+            self.assertTrue(part.UseMaterialCatalog)
+            self.assertEqual(str(part.BaseMaterial), "Galvanized Steel")
+            self.assertEqual(str(part.EffectiveMaterial), "Galvanized Steel")
+            self.assertEqual(str(part.SheetSize), "16 ga")
+            self.assertAlmostEqual(
+                part.Thickness.Value / 25.4, 0.0635, places=7
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_plain_part_promoted_by_first_face_uses_document_defaults(self):
+        doc = App.newDocument("SheetMetalFacePromotionDefaults")
+        try:
+            config = materialConfiguration(doc, True)
+            config.DefaultBaseMaterial = "Galvanized Steel"
+            part = doc.addObject("App::Part", "Panel")
+
+            promoteNewSheetMetalPart(part)
+
+            self.assertEqual(part.SheetMetalType, "Part")
+            self.assertTrue(part.UseMaterialCatalog)
+            self.assertTrue(part.FollowMaterialUpgrade)
+            self.assertEqual(str(part.BaseMaterial), "Galvanized Steel")
+            self.assertAlmostEqual(
+                part.Thickness.Value / 25.4, 0.0785, places=7
+            )
         finally:
             App.closeDocument(doc.Name)
 

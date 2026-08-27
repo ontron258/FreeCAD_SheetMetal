@@ -125,7 +125,7 @@ def findSheetMetalPart(obj):
 
 
 def materialConfiguration(doc, create=False):
-    """Return the document's native material-upgrade variable set."""
+    """Return the document's material defaults and upgrade variable set."""
     config = doc.getObject(CONFIGURATION_OBJECT_NAME)
     if config is None and create:
         config = doc.addObject("App::VarSet", CONFIGURATION_OBJECT_NAME)
@@ -155,6 +155,38 @@ def materialConfiguration(doc, create=False):
     else:
         _ensure_enumeration_options(
             config, "MaterialUpgrade", MATERIAL_UPGRADES, "Standard"
+        )
+    if "DefaultBaseMaterial" not in config.PropertiesList:
+        config.addProperty(
+            "App::PropertyEnumeration",
+            "DefaultBaseMaterial",
+            "New Part Defaults",
+            translate(
+                "App::Property",
+                "Base material assigned to newly created sheet-metal parts",
+            ),
+        )
+        config.DefaultBaseMaterial = MATERIALS
+        config.DefaultBaseMaterial = "Hot Rolled Steel"
+    else:
+        _ensure_enumeration_options(
+            config, "DefaultBaseMaterial", MATERIALS, "Hot Rolled Steel"
+        )
+    if "DefaultSheetSize" not in config.PropertiesList:
+        config.addProperty(
+            "App::PropertyEnumeration",
+            "DefaultSheetSize",
+            "New Part Defaults",
+            translate(
+                "App::Property",
+                "Sheet size assigned to newly created sheet-metal parts",
+            ),
+        )
+        config.DefaultSheetSize = SHEET_SIZES
+        config.DefaultSheetSize = "14 ga"
+    else:
+        _ensure_enumeration_options(
+            config, "DefaultSheetSize", SHEET_SIZES, "14 ga"
         )
     return config
 
@@ -303,10 +335,10 @@ def applyMaterialDefaults(part, create_configuration=False):
 
 def configureNewPart(part):
     """Enable catalog defaults and product upgrade behavior on a new part."""
-    materialConfiguration(part.Document, True)
+    config = materialConfiguration(part.Document, True)
     part.UseMaterialCatalog = True
-    part.BaseMaterial = "Hot Rolled Steel"
-    part.SheetSize = "14 ga"
+    part.BaseMaterial = str(config.DefaultBaseMaterial)
+    part.SheetSize = str(config.DefaultSheetSize)
     part.FollowMaterialUpgrade = True
     part.UseStandardBendRadius = True
     part.UseStandardKFactor = True

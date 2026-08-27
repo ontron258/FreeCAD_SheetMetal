@@ -21,14 +21,15 @@ from SheetMetalShapedFlangeCmd import (
 
 
 class _SketchStub:
-    def __init__(self, label, wire, placement=None):
+    def __init__(self, label, wire, placement=None, global_placement=None):
         self.Name = label.replace(" ", "_")
         self.Label = label
         self.Shape = wire
-        self._placement = placement
+        self.Placement = placement or App.Placement()
+        self._global_placement = global_placement or self.Placement
 
     def getGlobalPlacement(self):
-        return self._placement or App.Placement()
+        return self._global_placement
 
 
 def _panel(label, points, placement=None):
@@ -119,6 +120,41 @@ class TestShapedFlange(unittest.TestCase):
         result = makeShapedFlange([sketch], thickness=2.0, radius=1.0)
         self.assertEqual(len(result.Solids), 1)
         self.assertAlmostEqual(result.Volume, 400.0, places=5)
+
+    def test_stage_uses_profile_local_normal_inside_transformed_part(self):
+        sketch = _SketchStub(
+            "TransformedPartProfile",
+            Part.makePolygon(
+                [
+                    App.Vector(0, 0, 0),
+                    App.Vector(20, 0, 0),
+                    App.Vector(20, 10, 0),
+                    App.Vector(0, 10, 0),
+                    App.Vector(0, 0, 0),
+                ]
+            ),
+            placement=App.Placement(),
+            global_placement=App.Placement(
+                App.Vector(100, 200, 300),
+                App.Rotation(App.Vector(1, 0, 0), 90),
+            ),
+        )
+
+        result = makeShapedFlangeStages(
+            [
+                {
+                    "sketches": [sketch],
+                    "radius": 1.0,
+                    "thickness_side": "Centered",
+                }
+            ],
+            thickness=2.0,
+        )
+
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume, 400.0, places=5)
+        self.assertAlmostEqual(result.BoundBox.ZLength, 2.0, places=5)
 
     def test_right_angle_panels_get_constant_thickness_bend(self):
         base = _panel(

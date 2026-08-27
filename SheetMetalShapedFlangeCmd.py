@@ -418,8 +418,19 @@ def makeShapedFlange(
 
 
 def _sketch_normal(sketch):
-    """Return the stable global +Z direction of a sketch support plane."""
-    placement = sketch.getGlobalPlacement() if hasattr(sketch, "getGlobalPlacement") else None
+    """Return sketch +Z in the coordinate system used by ``sketch.Shape``.
+
+    Sketch geometry already includes the sketch's placement relative to its
+    containing Body/Part, but it does not include the placement of that
+    container.  Using ``getGlobalPlacement()`` therefore mixes global vectors
+    with local face geometry and produces a zero-volume extrusion when the
+    owning Part is rotated.
+    """
+    placement = getattr(sketch, "Placement", None)
+    if placement is None and hasattr(sketch, "getGlobalPlacement"):
+        # Keep lightweight/test profile objects without a Placement property
+        # working; real FreeCAD sketches always take the local branch above.
+        placement = sketch.getGlobalPlacement()
     if placement is None:
         return _unit(FreeCAD.Vector(0, 0, 1), "Invalid sketch normal.")
     return _unit(

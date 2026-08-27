@@ -78,6 +78,30 @@ class TestShapedFlange(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_drawing_name_uses_organizational_group_without_duplication(self):
+        doc = App.newDocument("SheetMetalDrawingName")
+        try:
+            group = doc.addObject("App::DocumentObjectGroup", "FeedDrive")
+            group.Label = "Feed Drive"
+            part = doc.addObject("App::Part", "CrossBar")
+            part.Label = "Cross Bar"
+            group.addObject(part)
+            addSheetMetalPartProperties(part)
+
+            self.assertEqual(part.DrawingName, "Feed Drive – Cross Bar")
+
+            part.Label = "Feed Drive Cross Bar"
+            self.assertEqual(part.DrawingName, "Feed Drive Cross Bar")
+
+            part.Label = "Cross Bar"
+            group.Label = "Drive System"
+            self.assertEqual(part.DrawingName, "Drive System – Cross Bar")
+
+            part.UseGroupInDrawingName = False
+            self.assertEqual(part.DrawingName, "Cross Bar")
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_experimental_group_upgrades_to_an_app_part(self):
         doc = App.newDocument("ShapedFlangePartUpgrade")
         try:
@@ -309,6 +333,45 @@ class TestShapedFlange(unittest.TestCase):
             if type(face.Surface).__name__ == "Cylinder"
         )
         self.assertEqual(cylinder_radii, [4.0, 6.0])
+
+    def test_angled_flange_edges_continue_through_bend_ends(self):
+        base = _panel(
+            "Base",
+            [App.Vector(0, 0, 0), App.Vector(20, 0, 0),
+             App.Vector(20, 10, 0), App.Vector(0, 10, 0)],
+        )
+        wall = _panel(
+            "AngledWall",
+            [App.Vector(0, 0, 0), App.Vector(2, 0, 4),
+             App.Vector(18, 0, 4), App.Vector(20, 0, 0)],
+            App.Placement(
+                App.Vector(), App.Rotation(App.Vector(1, 0, 0), 90)
+            ),
+        )
+
+        result = makeShapedFlangeStages(
+            [
+                {"sketches": [base], "radius": 1.0,
+                 "thickness_side": "Centered"},
+                {"sketches": [wall], "radius": 1.0,
+                 "thickness_side": "Centered"},
+            ],
+            thickness=1.0,
+        )
+
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        cylindrical_bend_faces = [
+            face for face in result.Faces
+            if type(face.Surface).__name__ == "Cylinder"
+        ]
+        formed_end_faces = [
+            face for face in result.Faces
+            if type(face.Surface).__name__ == "BSplineSurface"
+        ]
+        self.assertEqual(len(cylindrical_bend_faces), 2)
+        self.assertEqual(len(formed_end_faces), 2)
+        self.assertTrue(all(face.Area > 0.0 for face in formed_end_faces))
 
     def test_rectangle_and_round_bend_reliefs_cut_both_bend_ends(self):
         base = _panel(

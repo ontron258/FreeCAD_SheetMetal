@@ -26,6 +26,7 @@ import FreeCAD
 import Part
 
 import SheetMetalMaterial
+import SheetMetalNaming
 import SheetMetalTools
 
 
@@ -302,6 +303,165 @@ def _bend_solid(data, radius, thickness, start_offset=0.0, end_offset=0.0):
     return section.extrude(_scaled(data["axis"], length))
 
 
+def _edge_direction_from_endpoint(face, shared_edge, endpoint, tolerance):
+    """Return the neighboring boundary-edge direction at one bend endpoint."""
+    for edge in face.Edges:
+        if edge.isSame(shared_edge) or len(edge.Vertexes) < 2:
+            continue
+        first = edge.Vertexes[0].Point
+        last = edge.Vertexes[-1].Point
+        if first.distanceToPoint(endpoint) <= tolerance:
+            return edge.tangentAt(edge.FirstParameter)
+        if last.distanceToPoint(endpoint) <= tolerance:
+            return edge.tangentAt(edge.LastParameter).negative()
+    return None
+
+
+def _interpolated_bend_end_edge(
+    data, radius, base_offset, first_shift, second_shift, samples=17,
+):
+    """Map one developed boundary line onto a cylindrical bend radius."""
+    axis = data["axis"]
+    radial1 = data["radial1"]
+    radial2 = data["radial2"]
+    bend_angle = math.degrees(
+        math.atan2(
+            axis.dot(radial1.cross(radial2)),
+            radial1.dot(radial2),
+        )
+    )
+    points = []
+    for index in range(samples):
+        parameter = float(index) / float(samples - 1)
+        radial = FreeCAD.Rotation(
+            axis, bend_angle * parameter
+        ).multVec(radial1)
+        shift = first_shift + (second_shift - first_shift) * parameter
+        points.append(
+            data["center"]
+            + _scaled(radial, radius)
+            + _scaled(axis, base_offset + shift)
+        )
+    curve = Part.BSplineCurve()
+    curve.interpolate(Points=points)
+    return curve.toShape()
+
+
+def _bend_end_cutting_solid(
+    data, radius, thickness, base_offset,
+    first_shift, second_shift, away, extent,
+):
+    """Make the outside solid bounded by a formed/developed bend-end surface."""
+    radial_margin = max(thickness * 2.0, radius * 0.25, smEpsilon * 100.0)
+    tool_inner_radius = max(
+        smEpsilon * 10.0, radius - radial_margin
+    )
+    tool_outer_radius = radius + thickness + radial_margin
+    boundary_edges = [
+        _interpolated_bend_end_edge(
+            data, tool_radius, base_offset, first_shift, second_shift
+        )
+        for tool_radius in (tool_inner_radius, tool_outer_radius)
+    ]
+    far_edges = []
+    for edge in boundary_edges:
+        far_edge = edge.copy()
+        far_edge.translate(_scaled(away, extent))
+        far_edges.append(far_edge)
+
+    faces = [
+        Part.makeRuledSurface(boundary_edges[0], boundary_edges[1]),
+        Part.makeRuledSurface(far_edges[0], far_edges[1]),
+        Part.makeRuledSurface(boundary_edges[0], far_edges[0]),
+        Part.makeRuledSurface(boundary_edges[1], far_edges[1]),
+    ]
+    for vertex_index in (0, 1):
+        points = [
+            boundary_edges[0].Vertexes[vertex_index].Point,
+            boundary_edges[1].Vertexes[vertex_index].Point,
+            far_edges[1].Vertexes[vertex_index].Point,
+            far_edges[0].Vertexes[vertex_index].Point,
+        ]
+        faces.append(Part.Face(Part.makePolygon(points + [points[0]])))
+    shell = Part.makeShell(faces)
+    if not shell.isClosed():
+        raise ValueError(
+            translate("SheetMetal", "Cannot close a formed bend-end boundary.")
+        )
+    return Part.makeSolid(shell)
+
+
+def _clip_bend_to_angled_ends(
+    bend, data, radius, thickness,
+    first_face, first_edge, second_face, second_edge, tolerance,
+):
+    """Deform arbitrary panel boundary directions through a bend.
+
+    The axial position at each tangent comes from the corresponding panel
+    boundary.  Linear interpolation in developed bend angle maps that boundary
+    to a curved edge on the formed cylinder.  The cutting solid spans beyond
+    both sheet surfaces so OpenCASCADE retains the exact cylindrical inner and
+    outer bend faces.
+    """
+    result = bend
+    axis = data["axis"]
+    diagonal = math.sqrt(
+        bend.BoundBox.XLength ** 2
+        + bend.BoundBox.YLength ** 2
+        + bend.BoundBox.ZLength ** 2
+    )
+    extent = max(diagonal, data["length"], radius + thickness, 1.0) * 2.0
+
+    for endpoint_index, endpoint in enumerate((data["p0"], data["p1"])):
+        first_direction = _edge_direction_from_endpoint(
+            first_face, first_edge, endpoint, tolerance
+        )
+        second_direction = _edge_direction_from_endpoint(
+            second_face, second_edge, endpoint, tolerance
+        )
+        if first_direction is None or second_direction is None:
+            continue
+
+        first_depth = data.get("relief_base_depth1", data.get("setback", 0.0))
+        second_depth = data.get("relief_base_depth2", data.get("setback", 0.0))
+        first_denominator = first_direction.dot(data["inward1"])
+        second_denominator = second_direction.dot(data["inward2"])
+        if (
+            abs(first_denominator) <= tolerance
+            or abs(second_denominator) <= tolerance
+        ):
+            continue
+        first_shift = (
+            first_direction.dot(axis) * first_depth / first_denominator
+        )
+        second_shift = (
+            second_direction.dot(axis) * second_depth / second_denominator
+        )
+        if abs(first_shift) <= tolerance and abs(second_shift) <= tolerance:
+            continue
+        away = axis.negative() if endpoint_index == 0 else axis
+        cutting_solid = _bend_end_cutting_solid(
+            data,
+            radius,
+            thickness,
+            0.0 if endpoint_index == 0 else data["length"],
+            first_shift,
+            second_shift,
+            away,
+            extent,
+        )
+        clipped = result.cut(cutting_solid)
+        if clipped.isNull() or not clipped.Solids:
+            raise ValueError(
+                translate(
+                    "SheetMetal",
+                    "A formed profile boundary removes the complete bend.",
+                )
+            )
+        result = clipped
+    return result
+
+
 def makeShapedFlange(
     sketches, thickness=1.0, radius=1.0, refine=True, bend_plane="Centered",
     region_operations=None,
@@ -350,7 +510,20 @@ def makeShapedFlange(
                         )
                         first["thickness_dirs"].append(data["radial1"])
                         second["thickness_dirs"].append(data["radial2"])
-                        bends.append(_bend_solid(data, radius, thickness))
+                        bend = _bend_solid(data, radius, thickness)
+                        bends.append(
+                            _clip_bend_to_angled_ends(
+                                bend,
+                                data,
+                                radius,
+                                thickness,
+                                first["face"],
+                                first_edge,
+                                second["face"],
+                                second_edge,
+                                tolerance,
+                            )
+                        )
 
     if len(panels) > 1:
         reached = {0}
@@ -624,7 +797,20 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
                             owner["stage"].get("relief_type", "None")
                         )
                         if relief_type == "None":
-                            bends.append(_bend_solid(data, radius, thickness))
+                            bend = _bend_solid(data, radius, thickness)
+                            bends.append(
+                                _clip_bend_to_angled_ends(
+                                    bend,
+                                    data,
+                                    radius,
+                                    thickness,
+                                    first["face"],
+                                    first_edge,
+                                    second["face"],
+                                    second_edge,
+                                    tolerance,
+                                )
+                            )
                             continue
 
                         relief_width = float(
@@ -672,13 +858,24 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
                                     relief_type,
                                 )
                             )
+                        bend = _bend_solid(
+                            data,
+                            radius,
+                            thickness,
+                            relief_width,
+                            relief_width,
+                        )
                         bends.append(
-                            _bend_solid(
+                            _clip_bend_to_angled_ends(
+                                bend,
                                 data,
                                 radius,
                                 thickness,
-                                relief_width,
-                                relief_width,
+                                first["face"],
+                                first_edge,
+                                second["face"],
+                                second_edge,
+                                tolerance,
                             )
                         )
 
@@ -790,6 +987,7 @@ def addSheetMetalPartProperties(part):
     part.setEditorMode("Tip", 1)
     SheetMetalMaterial.addMaterialProperties(part)
     SheetMetalMaterial.applyMaterialDefaults(part)
+    SheetMetalNaming.addDrawingIdentityProperties(part)
 
 
 def createSheetMetalPart(doc):

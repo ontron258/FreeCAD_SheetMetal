@@ -293,29 +293,8 @@ def _isUnfoldObject(obj):
     )
 
 
-def _matching_planar_face_name(source_face, target_shape):
-    """Find the descendant of a selected planar face in a later feature shape."""
-    if source_face is None or not isinstance(source_face.Surface, Part.Plane):
-        return None
-    best_name = None
-    best_overlap = 0.0
-    for index, candidate in enumerate(target_shape.Faces, 1):
-        if not isinstance(candidate.Surface, Part.Plane):
-            continue
-        try:
-            overlap = source_face.common(candidate).Area
-        except Part.OCCError:
-            continue
-        if overlap > best_overlap:
-            best_overlap = overlap
-            best_name = "Face{}".format(index)
-    if best_overlap <= SheetMetalTools.smEpsilon:
-        return None
-    return best_name
-
-
 def _largest_planar_face_name(shape):
-    """Return a stable broad sheet face for recovery from an invalid source."""
+    """Return a stable broad sheet face for a part-following Unfold."""
     candidates = [
         (face.Area, "Face{}".format(index))
         for index, face in enumerate(shape.Faces, 1)
@@ -324,88 +303,83 @@ def _largest_planar_face_name(shape):
     return max(candidates, default=(0.0, None))[1]
 
 
-def retargetUnfoldsToPartTip(sheet_metal_part, new_tip, previous_tip=None):
-    """Move part-following Unfold sources to a newly-created Face feature.
+def _owning_sheet_metal_part(obj):
+    """Return the real Sheet Metal Part containing an Unfold object."""
+    current = obj
+    while current is not None:
+        if (
+            current.TypeId == "App::Part"
+            and getattr(current, "SheetMetalType", None) == "Part"
+        ):
+            return current
+        current = current.getParentGeoFeatureGroup() or current.getParentGroup()
+    return None
 
-    An Unfold selected from a feature inside a PartDesign Body is stored as a
-    LinkSub to the Body, qualified by the feature name (for example
-    ``ShapedFlange.Face4``).  That deliberately stable link otherwise remains
-    on the old cumulative feature when another Face is appended to the part.
-    """
-    if sheet_metal_part is None or new_tip is None or new_tip.Shape.isNull():
+
+def _ensure_part_tip_properties(unfold):
+    if "FollowPartTip" not in unfold.PropertiesList:
+        SheetMetalTools.smAddBoolProperty(
+            unfold,
+            "FollowPartTip",
+            translate(
+                "SheetMetal",
+                "Keep this flat pattern linked to the owning part's latest feature",
+            ),
+            True,
+            "Parameters",
+        )
+    if "FollowedTip" not in unfold.PropertiesList:
+        SheetMetalTools.smAddProperty(
+            unfold,
+            "App::PropertyXLink",
+            "FollowedTip",
+            translate("SheetMetal", "Current owning-part feature used by the Unfold"),
+            None,
+            "Hidden",
+        )
+    unfold.setEditorMode("FollowedTip", 2)
+
+
+def resolveUnfoldSource(unfold):
+    """Resolve the actual solid and A-face used for an Unfold execution."""
+    _ensure_part_tip_properties(unfold)
+    if unfold.FollowPartTip:
+        tip = unfold.FollowedTip
+        if tip is None:
+            owner = _owning_sheet_metal_part(unfold)
+            tip = (
+                unfold.Document.getObject(owner.Tip)
+                if owner is not None and getattr(owner, "Tip", "")
+                else None
+            )
+        if tip is not None and hasattr(tip, "Shape") and not tip.Shape.isNull():
+            face_name = _largest_planar_face_name(tip.Shape)
+            if face_name is not None:
+                return tip, face_name
+
+    base_obj, base_face = SheetMetalTools.smGetSubElementName(
+        unfold.baseObject[1][0]
+    )
+    if base_obj is None:
+        base_obj = unfold.baseObject[0]
+    return base_obj, base_face
+
+
+def retargetUnfoldsToPartTip(sheet_metal_part, new_tip, previous_tip=None):
+    """Point owned Unfold dependencies at a newly-created part-tip feature."""
+    del previous_tip  # Retained in the public call signature for compatibility.
+    if sheet_metal_part is None or new_tip is None:
         return []
-    history = {}
-    current = previous_tip
-    while current is not None and current.Name not in history:
-        history[current.Name] = current
-        current = getattr(current, "PreviousFeature", None)
     updated = []
     for unfold in sheet_metal_part.Document.Objects:
         if not _isUnfoldObject(unfold):
             continue
-        owner = unfold
-        while owner is not None and owner is not sheet_metal_part:
-            owner = owner.getParentGeoFeatureGroup() or owner.getParentGroup()
-        if owner is not sheet_metal_part:
+        if _owning_sheet_metal_part(unfold) is not sheet_metal_part:
             continue
-        base_link, sub_names = unfold.baseObject
-        if base_link is None or not sub_names:
-            continue
-        if "FollowPartTip" not in unfold.PropertiesList:
-            SheetMetalTools.smAddBoolProperty(
-                unfold,
-                "FollowPartTip",
-                translate(
-                    "SheetMetal",
-                    "Keep this flat pattern linked to the owning part's latest feature",
-                ),
-                True,
-                "Parameters",
-            )
+        _ensure_part_tip_properties(unfold)
         if not unfold.FollowPartTip:
             continue
-
-        sub_name = sub_names[0]
-        source_feature = base_link
-        source_element = sub_name
-        qualified = "." in sub_name
-        invalid_body_prefix = False
-        if qualified:
-            feature_name, source_element = sub_name.split(".", 1)
-            source_feature = unfold.Document.getObject(feature_name)
-            source_body = (
-                source_feature.getParentGeoFeatureGroup()
-                if source_feature is not None
-                else None
-            )
-            # Recover LinkSubs whose feature prefix came from another Body.
-            # The element suffix still identifies the user's selected A-face
-            # on the previous tip in that Body.
-            if (
-                base_link.TypeId == "PartDesign::Body"
-                and source_body is not base_link
-            ):
-                invalid_body_prefix = True
-                source_feature = previous_tip
-        if source_feature is None or source_feature.Name not in history:
-            continue
-        if invalid_body_prefix:
-            target_element = _largest_planar_face_name(new_tip.Shape)
-        else:
-            try:
-                source_face = source_feature.Shape.getElement(source_element)
-            except (Part.OCCError, RuntimeError):
-                continue
-            target_element = _matching_planar_face_name(source_face, new_tip.Shape)
-        if target_element is None:
-            continue
-        if qualified:
-            unfold.baseObject = (
-                base_link,
-                ["{}.{}".format(new_tip.Name, target_element)],
-            )
-        else:
-            unfold.baseObject = (new_tip, [target_element])
+        unfold.FollowedTip = new_tip
         unfold.touch()
         updated.append(unfold)
     return updated
@@ -433,20 +407,28 @@ def migrateDocumentUnfoldPartTips(doc):
 
 
 class _UnfoldPartTipObserver:
-    """Update saved flat patterns when a document with newer Faces activates."""
+    """Maintain current-tip dependencies without recomputing during restore."""
 
     def slotActivateDocument(self, doc):
-        updated = migrateDocumentUnfoldPartTips(doc)
-        if any(not getattr(unfold, "ManualRecompute", False) for unfold in updated):
-            doc.recompute()
+        migrateDocumentUnfoldPartTips(doc)
+
+    def slotChangedObject(self, obj, prop):
+        if not (
+            prop == "Tip"
+            and obj.TypeId == "App::Part"
+            and getattr(obj, "SheetMetalType", None) == "Part"
+        ):
+            return
+        tip = obj.Document.getObject(obj.Tip) if obj.Tip else None
+        if tip is not None:
+            retargetUnfoldsToPartTip(obj, tip)
 
 
 if "_unfold_part_tip_observer" not in globals():
     _unfold_part_tip_observer = _UnfoldPartTipObserver()
     FreeCAD.addDocumentObserver(_unfold_part_tip_observer)
     for _open_document in FreeCAD.listDocuments().values():
-        if migrateDocumentUnfoldPartTips(_open_document):
-            _open_document.recompute()
+        migrateDocumentUnfoldPartTips(_open_document)
 
 
 ###################################################################################################
@@ -517,6 +499,7 @@ class SMUnfold:
             ),
             True,
         )
+        _ensure_part_tip_properties(obj)
         SheetMetalTools.smAddBoolProperty(obj,
             "GenerateSketch",
             translate("SheetMetal", "Generate unfold sketch"),
@@ -598,6 +581,19 @@ class SMUnfold:
         return None
 
     def onChanged(self, obj, prop):
+        if prop == "FollowPartTip" and "FollowedTip" in obj.PropertiesList:
+            if obj.FollowPartTip:
+                owner = _owning_sheet_metal_part(obj)
+                tip = (
+                    obj.Document.getObject(owner.Tip)
+                    if owner is not None and getattr(owner, "Tip", "")
+                    else None
+                )
+                if tip is not None:
+                    obj.FollowedTip = tip
+            else:
+                obj.FollowedTip = None
+            obj.touch()
         if prop == "Visibility":
             isVisible = obj.Visibility
             visibleSketches = obj.Proxy.visibleSketches if isVisible else []
@@ -612,6 +608,19 @@ class SMUnfold:
                             sketch.Visibility = False
             if not isVisible:
                 obj.Proxy.visibleSketches = visibleSketches
+
+    def onDocumentRestored(self, obj):
+        """Restore the tip dependency only after this Python proxy exists."""
+        self.addVerifyProperties(obj)
+        owner = _owning_sheet_metal_part(obj)
+        tip = (
+            obj.Document.getObject(owner.Tip)
+            if owner is not None and getattr(owner, "Tip", "")
+            else None
+        )
+        if obj.FollowPartTip and tip is not None:
+            obj.FollowedTip = tip
+        obj.touch()
 
     def getBendCutProfile(self, obj):
         """Return the normalized (tileable) relief profile wire to use for
@@ -808,9 +817,7 @@ class SMUnfold:
 
         """
         self.addVerifyProperties(fp)
-        baseObj, baseFace = SheetMetalTools.smGetSubElementName(fp.baseObject[1][0])
-        if baseObj is None:
-            baseObj = fp.baseObject[0]
+        baseObj, baseFace = resolveUnfoldSource(fp)
         if not NewUnfolderAvailable or SheetMetalTools.use_old_unfolder():
             shape, sketches = self.oldUnfolder(fp, baseObj, baseFace)
         else:

@@ -11,6 +11,7 @@ from SheetMetalUnfoldCmd import (
     _isUnfoldObject,
     arrangeFlatPatternLinks,
     migrateDocumentUnfoldPartTips,
+    resolveUnfoldSource,
     retargetUnfoldsToPartTip,
     smExportLayeredUnfoldDXF,
 )
@@ -21,6 +22,8 @@ class TestFlatPatternWorkspace(unittest.TestCase):
         doc = App.newDocument("FlatPatternFollowPartTip")
         try:
             sheet_part = doc.addObject("App::Part", "SheetMetalPart")
+            sheet_part.addProperty("App::PropertyString", "SheetMetalType")
+            sheet_part.SheetMetalType = "Part"
             body = doc.addObject("PartDesign::Body", "Body")
             sheet_part.addObject(body)
             first = doc.addObject("PartDesign::Feature", "ShapedFlange")
@@ -46,10 +49,12 @@ class TestFlatPatternWorkspace(unittest.TestCase):
 
             self.assertEqual(updated, [unfold])
             self.assertIs(unfold.baseObject[0], body)
-            self.assertTrue(
-                unfold.baseObject[1][0].startswith("ShapedFlange001.Face")
-            )
+            self.assertEqual(unfold.baseObject[1], ["ShapedFlange.Face1"])
             self.assertTrue(unfold.FollowPartTip)
+            self.assertIs(unfold.FollowedTip, second)
+            source, face_name = resolveUnfoldSource(unfold)
+            self.assertIs(source, second)
+            self.assertTrue(face_name.startswith("Face"))
         finally:
             App.closeDocument(doc.Name)
 
@@ -85,9 +90,8 @@ class TestFlatPatternWorkspace(unittest.TestCase):
             updated = migrateDocumentUnfoldPartTips(doc)
 
             self.assertEqual(updated, [unfold])
-            self.assertTrue(
-                unfold.baseObject[1][0].startswith("ShapedFlange001.Face")
-            )
+            self.assertIs(unfold.FollowedTip, second)
+            self.assertEqual(unfold.baseObject[1], ["ShapedFlange.Face1"])
         finally:
             App.closeDocument(doc.Name)
 
@@ -131,9 +135,11 @@ class TestFlatPatternWorkspace(unittest.TestCase):
 
             self.assertEqual(updated, [unfold])
             self.assertIs(unfold.baseObject[0], first_body)
-            target_name = unfold.baseObject[1][0]
-            self.assertTrue(target_name.startswith("FirstTip.Face"))
-            target_face = first_body.getSubObject(target_name)
+            self.assertEqual(unfold.baseObject[1], ["OtherTip.Face1"])
+            self.assertIs(unfold.FollowedTip, first_tip)
+            source, target_name = resolveUnfoldSource(unfold)
+            self.assertIs(source, first_tip)
+            target_face = first_tip.Shape.getElement(target_name)
             self.assertGreater(target_face.Area, 100.0)
         finally:
             App.closeDocument(doc.Name)

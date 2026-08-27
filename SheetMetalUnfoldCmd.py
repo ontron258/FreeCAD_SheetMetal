@@ -293,6 +293,128 @@ def _isUnfoldObject(obj):
     )
 
 
+def _matching_planar_face_name(source_face, target_shape):
+    """Find the descendant of a selected planar face in a later feature shape."""
+    if source_face is None or not isinstance(source_face.Surface, Part.Plane):
+        return None
+    best_name = None
+    best_overlap = 0.0
+    for index, candidate in enumerate(target_shape.Faces, 1):
+        if not isinstance(candidate.Surface, Part.Plane):
+            continue
+        try:
+            overlap = source_face.common(candidate).Area
+        except Part.OCCError:
+            continue
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_name = "Face{}".format(index)
+    if best_overlap <= SheetMetalTools.smEpsilon:
+        return None
+    return best_name
+
+
+def retargetUnfoldsToPartTip(sheet_metal_part, new_tip, previous_tip=None):
+    """Move part-following Unfold sources to a newly-created Face feature.
+
+    An Unfold selected from a feature inside a PartDesign Body is stored as a
+    LinkSub to the Body, qualified by the feature name (for example
+    ``ShapedFlange.Face4``).  That deliberately stable link otherwise remains
+    on the old cumulative feature when another Face is appended to the part.
+    """
+    if sheet_metal_part is None or new_tip is None or new_tip.Shape.isNull():
+        return []
+    history = set()
+    current = previous_tip
+    while current is not None and current not in history:
+        history.add(current)
+        current = getattr(current, "PreviousFeature", None)
+    updated = []
+    for unfold in sheet_metal_part.Document.Objects:
+        if not _isUnfoldObject(unfold):
+            continue
+        base_link, sub_names = unfold.baseObject
+        if base_link is None or not sub_names:
+            continue
+        if "FollowPartTip" not in unfold.PropertiesList:
+            SheetMetalTools.smAddBoolProperty(
+                unfold,
+                "FollowPartTip",
+                translate(
+                    "SheetMetal",
+                    "Keep this flat pattern linked to the owning part's latest feature",
+                ),
+                True,
+                "Parameters",
+            )
+        if not unfold.FollowPartTip:
+            continue
+
+        sub_name = sub_names[0]
+        source_feature = base_link
+        source_element = sub_name
+        qualified = "." in sub_name
+        if qualified:
+            feature_name, source_element = sub_name.split(".", 1)
+            source_feature = unfold.Document.getObject(feature_name)
+        if source_feature not in history:
+            continue
+        try:
+            source_face = source_feature.Shape.getElement(source_element)
+        except (Part.OCCError, RuntimeError):
+            continue
+        target_element = _matching_planar_face_name(source_face, new_tip.Shape)
+        if target_element is None:
+            continue
+        if qualified:
+            unfold.baseObject = (
+                base_link,
+                ["{}.{}".format(new_tip.Name, target_element)],
+            )
+        else:
+            unfold.baseObject = (new_tip, [target_element])
+        unfold.touch()
+        updated.append(unfold)
+    return updated
+
+
+def migrateDocumentUnfoldPartTips(doc):
+    """Retarget saved part-following Unfolds that predate the latest Face."""
+    updated = []
+    for candidate in doc.Objects:
+        if not (
+            getattr(candidate, "SheetMetalType", None) == "Part"
+            and hasattr(candidate, "Tip")
+        ):
+            continue
+        tip = doc.getObject(candidate.Tip) if candidate.Tip else None
+        if tip is None:
+            continue
+        updated.extend(
+            retargetUnfoldsToPartTip(
+                candidate, tip, getattr(tip, "PreviousFeature", None)
+            )
+        )
+    return updated
+
+
+class _UnfoldPartTipObserver:
+    """Update saved flat patterns when a document with newer Faces activates."""
+
+    def slotActivateDocument(self, doc):
+        updated = migrateDocumentUnfoldPartTips(doc)
+        if any(not getattr(unfold, "ManualRecompute", False) for unfold in updated):
+            doc.recompute()
+
+
+if "_unfold_part_tip_observer" not in globals():
+    _unfold_part_tip_observer = _UnfoldPartTipObserver()
+    FreeCAD.addDocumentObserver(_unfold_part_tip_observer)
+    for _open_document in FreeCAD.listDocuments().values():
+        if migrateDocumentUnfoldPartTips(_open_document):
+            _open_document.recompute()
+
+
 ###################################################################################################
 # Object class
 ###################################################################################################
@@ -351,6 +473,15 @@ class SMUnfold:
             "ManualRecompute",
             translate("SheetMetal", "If set, object recomputation will be done on demand only"),
             False,
+        )
+        SheetMetalTools.smAddBoolProperty(
+            obj,
+            "FollowPartTip",
+            translate(
+                "SheetMetal",
+                "Keep this flat pattern linked to the owning part's latest feature",
+            ),
+            True,
         )
         SheetMetalTools.smAddBoolProperty(obj,
             "GenerateSketch",

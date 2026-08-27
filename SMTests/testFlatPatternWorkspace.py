@@ -10,11 +10,87 @@ import Part
 from SheetMetalUnfoldCmd import (
     _isUnfoldObject,
     arrangeFlatPatternLinks,
+    migrateDocumentUnfoldPartTips,
+    retargetUnfoldsToPartTip,
     smExportLayeredUnfoldDXF,
 )
 
 
 class TestFlatPatternWorkspace(unittest.TestCase):
+    def test_unfold_source_follows_a_new_sheet_metal_part_tip(self):
+        doc = App.newDocument("FlatPatternFollowPartTip")
+        try:
+            sheet_part = doc.addObject("App::Part", "SheetMetalPart")
+            body = doc.addObject("PartDesign::Body", "Body")
+            sheet_part.addObject(body)
+            first = doc.addObject("PartDesign::Feature", "ShapedFlange")
+            first.Shape = Part.makeBox(20.0, 10.0, 1.0)
+            body.addObject(first)
+            second = doc.addObject("PartDesign::Feature", "ShapedFlange001")
+            second.Shape = first.Shape.fuse(
+                Part.makeBox(20.0, 1.0, 5.0, App.Vector(0.0, 9.0, 1.0))
+            )
+            second.addProperty("App::PropertyLink", "PreviousFeature")
+            second.PreviousFeature = first
+            body.addObject(second)
+
+            unfold = doc.addObject("Part::FeaturePython", "Body_Unfold")
+            unfold.addProperty("App::PropertyLinkSub", "baseObject")
+            unfold.addProperty("App::PropertyStringList", "UnfoldSketches")
+            unfold.baseObject = (body, ["ShapedFlange.Face1"])
+            unfold.UnfoldSketches = []
+            sheet_part.addObject(unfold)
+            doc.recompute()
+
+            updated = retargetUnfoldsToPartTip(sheet_part, second, first)
+
+            self.assertEqual(updated, [unfold])
+            self.assertIs(unfold.baseObject[0], body)
+            self.assertTrue(
+                unfold.baseObject[1][0].startswith("ShapedFlange001.Face")
+            )
+            self.assertTrue(unfold.FollowPartTip)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_saved_unfold_source_migrates_to_the_current_part_tip(self):
+        doc = App.newDocument("FlatPatternMigratePartTip")
+        try:
+            sheet_part = doc.addObject("App::Part", "SheetMetalPart")
+            sheet_part.addProperty("App::PropertyString", "SheetMetalType")
+            sheet_part.SheetMetalType = "Part"
+            sheet_part.addProperty("App::PropertyString", "Tip")
+            body = doc.addObject("PartDesign::Body", "Body")
+            sheet_part.addObject(body)
+            first = doc.addObject("PartDesign::Feature", "ShapedFlange")
+            first.Shape = Part.makeBox(20.0, 10.0, 1.0)
+            body.addObject(first)
+            second = doc.addObject("PartDesign::Feature", "ShapedFlange001")
+            second.Shape = first.Shape.fuse(
+                Part.makeBox(20.0, 1.0, 5.0, App.Vector(0.0, 9.0, 1.0))
+            )
+            second.addProperty("App::PropertyLink", "PreviousFeature")
+            second.PreviousFeature = first
+            body.addObject(second)
+            sheet_part.Tip = second.Name
+
+            unfold = doc.addObject("Part::FeaturePython", "Body_Unfold")
+            unfold.addProperty("App::PropertyLinkSub", "baseObject")
+            unfold.addProperty("App::PropertyStringList", "UnfoldSketches")
+            unfold.baseObject = (body, ["ShapedFlange.Face1"])
+            unfold.UnfoldSketches = []
+            sheet_part.addObject(unfold)
+            doc.recompute()
+
+            updated = migrateDocumentUnfoldPartTips(doc)
+
+            self.assertEqual(updated, [unfold])
+            self.assertTrue(
+                unfold.baseObject[1][0].startswith("ShapedFlange001.Face")
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_flat_pattern_links_are_not_treated_as_unfold_objects(self):
         doc = App.newDocument("FlatPatternLinkDiscovery")
         try:

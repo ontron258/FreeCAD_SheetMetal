@@ -1821,6 +1821,20 @@ if SheetMetalTools.isGuiLoaded():
             Gui.Selection.clearSelection()
             Gui.Selection.addSelection(obj)
             doc.recompute()
+            try:
+                import SheetMetalUnfoldCmd
+
+                if SheetMetalUnfoldCmd.retargetUnfoldsToPartTip(
+                    sheet_part, obj, old_tip
+                ):
+                    doc.recompute()
+            except (ImportError, Part.OCCError, RuntimeError) as error:
+                FreeCAD.Console.PrintWarning(
+                    translate(
+                        "SheetMetal",
+                        "Could not update the part's existing flat pattern: %1\n",
+                    ).replace("%1", str(error))
+                )
             dialog = SMShapedFlangeTaskPanel(obj)
             SheetMetalTools.updateTaskTitleIcon(dialog)
             Gui.Control.showDialog(dialog)

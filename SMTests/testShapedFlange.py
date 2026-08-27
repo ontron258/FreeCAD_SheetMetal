@@ -13,6 +13,7 @@ from SheetMetalShapedFlangeCmd import (
     SMShapedFlange,
     _adopt_profiles,
     _part_tip_feature,
+    _SheetMetalPartDefaultsObserver,
     addSheetMetalPartProperties,
     createSheetMetalPart,
     makeShapedFlange,
@@ -44,6 +45,48 @@ def _multi_loop_sketch(label, loops):
 
 
 class TestShapedFlange(unittest.TestCase):
+    def test_deleted_face_tip_retreats_to_previous_feature(self):
+        doc = App.newDocument("ShapedFlangeDeletedTip")
+        try:
+            part = createSheetMetalPart(doc)
+            first = doc.addObject("Part::FeaturePython", "ShapedFlange")
+            first.addProperty("App::PropertyString", "SheetMetalType")
+            first.SheetMetalType = "Face"
+            first.addProperty("App::PropertyLink", "PreviousFeature")
+            part.addObject(first)
+            second = doc.addObject("Part::FeaturePython", "ShapedFlange")
+            second.addProperty("App::PropertyString", "SheetMetalType")
+            second.SheetMetalType = "Face"
+            second.addProperty("App::PropertyLink", "PreviousFeature")
+            second.PreviousFeature = first
+            part.addObject(second)
+            part.Tip = second.Name
+
+            _SheetMetalPartDefaultsObserver().slotDeletedObject(second)
+
+            self.assertEqual(part.Tip, first.Name)
+            self.assertIs(_part_tip_feature(part), first)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_stale_face_tip_recovers_surviving_chain(self):
+        doc = App.newDocument("ShapedFlangeStaleTip")
+        try:
+            part = createSheetMetalPart(doc)
+            feature = doc.addObject("Part::FeaturePython", "ShapedFlange")
+            feature.addProperty("App::PropertyString", "SheetMetalType")
+            feature.SheetMetalType = "Face"
+            feature.addProperty("App::PropertyLink", "PreviousFeature")
+            part.addObject(feature)
+            part.Tip = "DeletedShapedFlange"
+
+            recovered = _part_tip_feature(part)
+
+            self.assertIs(recovered, feature)
+            self.assertEqual(part.Tip, feature.Name)
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_saved_face_geometry_version_triggers_rebuild_migration(self):
         doc = App.newDocument("ShapedFlangeGeometryMigration")
         try:

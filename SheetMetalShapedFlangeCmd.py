@@ -1148,7 +1148,47 @@ def _feature_chain(feature):
 def _part_tip_feature(part):
     tip = part.Tip if hasattr(part, "Tip") else None
     if isinstance(tip, str):
-        return part.Document.getObject(tip) if tip else None
+        resolved = part.Document.getObject(tip) if tip else None
+        if resolved is not None and getattr(resolved, "SheetMetalType", None) == "Face":
+            return resolved
+
+        # Deleting the last Face historically left the string Tip pointing to
+        # a removed internal name. Recover the surviving chain tip so the next
+        # Face extends it instead of silently starting a replacement history.
+        features = []
+        for candidate in part.Document.Objects:
+            if getattr(candidate, "SheetMetalType", None) != "Face":
+                continue
+            try:
+                if _sheet_metal_part(candidate) is part:
+                    features.append(candidate)
+            except ValueError:
+                pass
+        referenced = {
+            candidate.PreviousFeature
+            for candidate in features
+            if getattr(candidate, "PreviousFeature", None) is not None
+        }
+        candidates = [
+            candidate for candidate in features if candidate not in referenced
+        ]
+        if candidates:
+            document_order = {
+                candidate.Name: index
+                for index, candidate in enumerate(part.Document.Objects)
+            }
+            candidates.sort(
+                key=lambda candidate: (
+                    len(_feature_chain(candidate)),
+                    document_order.get(candidate.Name, -1),
+                )
+            )
+            resolved = candidates[-1]
+            part.Tip = resolved.Name
+            return resolved
+        if tip:
+            part.Tip = ""
+        return None
     # Compatibility with the experimental group, whose Tip was a Link.
     return tip
 
@@ -1367,6 +1407,27 @@ class _SheetMetalPartDefaultsObserver:
 
     def slotActivateDocument(self, doc):
         migrateDocumentFaceGeometry(doc)
+
+    def slotDeletedObject(self, obj):
+        """Retreat a part Tip when its latest Face is deleted."""
+        if getattr(obj, "SheetMetalType", None) != "Face":
+            return
+        previous = getattr(obj, "PreviousFeature", None)
+        try:
+            part = _sheet_metal_part(obj)
+        except ValueError:
+            part = None
+            doc = getattr(obj, "Document", None)
+            if doc is not None:
+                for candidate in doc.Objects:
+                    if (
+                        getattr(candidate, "SheetMetalType", None) == "Part"
+                        and getattr(candidate, "Tip", "") == obj.Name
+                    ):
+                        part = candidate
+                        break
+        if part is not None and getattr(part, "Tip", "") == obj.Name:
+            part.Tip = previous.Name if previous is not None else ""
 
     def slotChangedObject(self, obj, prop):
         if prop not in self.geometry_properties or not (

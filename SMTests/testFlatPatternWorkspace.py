@@ -91,6 +91,53 @@ class TestFlatPatternWorkspace(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_part_tip_migration_recovers_a_cross_body_feature_prefix(self):
+        doc = App.newDocument("FlatPatternRecoverCrossBodyPrefix")
+        try:
+            first_part = doc.addObject("App::Part", "FirstPart")
+            first_part.addProperty("App::PropertyString", "SheetMetalType")
+            first_part.SheetMetalType = "Part"
+            first_part.addProperty("App::PropertyString", "Tip")
+            first_body = doc.addObject("PartDesign::Body", "FirstBody")
+            first_part.addObject(first_body)
+            first_base = doc.addObject("PartDesign::Feature", "FirstBase")
+            first_base.Shape = Part.makeBox(20.0, 10.0, 1.0)
+            first_body.addObject(first_base)
+            first_tip = doc.addObject("PartDesign::Feature", "FirstTip")
+            first_tip.Shape = first_base.Shape.cut(
+                Part.makeCylinder(1.0, 1.0, App.Vector(5.0, 5.0, 0.0))
+            )
+            first_tip.addProperty("App::PropertyLink", "PreviousFeature")
+            first_tip.PreviousFeature = first_base
+            first_body.addObject(first_tip)
+            first_part.Tip = first_tip.Name
+
+            other_part = doc.addObject("App::Part", "OtherPart")
+            other_body = doc.addObject("PartDesign::Body", "OtherBody")
+            other_part.addObject(other_body)
+            other_tip = doc.addObject("PartDesign::Feature", "OtherTip")
+            other_tip.Shape = Part.makeBox(5.0, 5.0, 1.0)
+            other_body.addObject(other_tip)
+
+            unfold = doc.addObject("Part::FeaturePython", "FirstUnfold")
+            unfold.addProperty("App::PropertyLinkSub", "baseObject")
+            unfold.addProperty("App::PropertyStringList", "UnfoldSketches")
+            unfold.baseObject = (first_body, ["OtherTip.Face1"])
+            unfold.UnfoldSketches = []
+            first_part.addObject(unfold)
+            doc.recompute()
+
+            updated = migrateDocumentUnfoldPartTips(doc)
+
+            self.assertEqual(updated, [unfold])
+            self.assertIs(unfold.baseObject[0], first_body)
+            target_name = unfold.baseObject[1][0]
+            self.assertTrue(target_name.startswith("FirstTip.Face"))
+            target_face = first_body.getSubObject(target_name)
+            self.assertGreater(target_face.Area, 100.0)
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_flat_pattern_links_are_not_treated_as_unfold_objects(self):
         doc = App.newDocument("FlatPatternLinkDiscovery")
         try:

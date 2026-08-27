@@ -314,6 +314,16 @@ def _matching_planar_face_name(source_face, target_shape):
     return best_name
 
 
+def _largest_planar_face_name(shape):
+    """Return a stable broad sheet face for recovery from an invalid source."""
+    candidates = [
+        (face.Area, "Face{}".format(index))
+        for index, face in enumerate(shape.Faces, 1)
+        if isinstance(face.Surface, Part.Plane)
+    ]
+    return max(candidates, default=(0.0, None))[1]
+
+
 def retargetUnfoldsToPartTip(sheet_metal_part, new_tip, previous_tip=None):
     """Move part-following Unfold sources to a newly-created Face feature.
 
@@ -324,14 +334,19 @@ def retargetUnfoldsToPartTip(sheet_metal_part, new_tip, previous_tip=None):
     """
     if sheet_metal_part is None or new_tip is None or new_tip.Shape.isNull():
         return []
-    history = set()
+    history = {}
     current = previous_tip
-    while current is not None and current not in history:
-        history.add(current)
+    while current is not None and current.Name not in history:
+        history[current.Name] = current
         current = getattr(current, "PreviousFeature", None)
     updated = []
     for unfold in sheet_metal_part.Document.Objects:
         if not _isUnfoldObject(unfold):
+            continue
+        owner = unfold
+        while owner is not None and owner is not sheet_metal_part:
+            owner = owner.getParentGeoFeatureGroup() or owner.getParentGroup()
+        if owner is not sheet_metal_part:
             continue
         base_link, sub_names = unfold.baseObject
         if base_link is None or not sub_names:
@@ -354,16 +369,34 @@ def retargetUnfoldsToPartTip(sheet_metal_part, new_tip, previous_tip=None):
         source_feature = base_link
         source_element = sub_name
         qualified = "." in sub_name
+        invalid_body_prefix = False
         if qualified:
             feature_name, source_element = sub_name.split(".", 1)
             source_feature = unfold.Document.getObject(feature_name)
-        if source_feature not in history:
+            source_body = (
+                source_feature.getParentGeoFeatureGroup()
+                if source_feature is not None
+                else None
+            )
+            # Recover LinkSubs whose feature prefix came from another Body.
+            # The element suffix still identifies the user's selected A-face
+            # on the previous tip in that Body.
+            if (
+                base_link.TypeId == "PartDesign::Body"
+                and source_body is not base_link
+            ):
+                invalid_body_prefix = True
+                source_feature = previous_tip
+        if source_feature is None or source_feature.Name not in history:
             continue
-        try:
-            source_face = source_feature.Shape.getElement(source_element)
-        except (Part.OCCError, RuntimeError):
-            continue
-        target_element = _matching_planar_face_name(source_face, new_tip.Shape)
+        if invalid_body_prefix:
+            target_element = _largest_planar_face_name(new_tip.Shape)
+        else:
+            try:
+                source_face = source_feature.Shape.getElement(source_element)
+            except (Part.OCCError, RuntimeError):
+                continue
+            target_element = _matching_planar_face_name(source_face, new_tip.Shape)
         if target_element is None:
             continue
         if qualified:
@@ -383,7 +416,8 @@ def migrateDocumentUnfoldPartTips(doc):
     updated = []
     for candidate in doc.Objects:
         if not (
-            getattr(candidate, "SheetMetalType", None) == "Part"
+            candidate.TypeId == "App::Part"
+            and getattr(candidate, "SheetMetalType", None) == "Part"
             and hasattr(candidate, "Tip")
         ):
             continue

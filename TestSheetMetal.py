@@ -26,4 +26,7 @@ from SMTests.testFolder import TestFolder
 from SMTests.testFlatPatternWorkspace import TestFlatPatternWorkspace
 from SMTests.testKfactor import TestKFactor
 from SMTests.testMaterialDefaults import TestMaterialDefaults
+from SMTests.testBoltConnection import TestBoltConnection
+from SMTests.testConnectedPattern import TestConnectedPattern
+from SMTests.testMirroredPart import TestMirroredPart
 from SMTests.testShapedFlange import TestShapedFlange

@@ -285,6 +285,32 @@ class TestMaterialDefaults(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_legacy_base_bend_with_null_proxy_is_restored(self):
+        doc = App.newDocument("SheetMetalNullBaseBendProxy")
+        try:
+            _part, base_bend = self._legacy_base_bend(
+                doc, "Panel", "BaseBend"
+            )
+            migrateDocumentBaseBends(doc)
+            doc.recompute()
+            original_min_x = base_bend.Shape.BoundBox.XMin
+
+            base_bend.Proxy = None
+            base_bend.BendSketch.Shape = Part.makePolygon(
+                [App.Vector(10, 0, 0), App.Vector(30, 0, 0)]
+            )
+            migrateDocumentBaseBends(doc)
+            doc.recompute()
+
+            self.assertEqual(base_bend.Proxy.__class__.__name__, "SMBaseBend")
+            self.assertTrue(base_bend.Shape.isValid())
+            self.assertNotAlmostEqual(
+                base_bend.Shape.BoundBox.XMin, original_min_x
+            )
+            self.assertAlmostEqual(base_bend.Shape.BoundBox.XMin, 10.0)
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_new_base_bend_creates_catalog_driven_sheet_metal_part(self):
         doc = App.newDocument("SheetMetalNewBaseBendPart")
         try:

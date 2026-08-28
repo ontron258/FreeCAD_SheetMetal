@@ -75,6 +75,13 @@ def _add_sheet_metal_part_properties(part):
 
 def _verify_base_bend_properties(obj):
     proxy = getattr(obj, "Proxy", None)
+    if proxy is None and _is_base_bend(obj):
+        # Some legacy documents retained the complete BaseBend schema and
+        # cached shape but serialized a null Python proxy.  Reattach only the
+        # behavior object; all existing properties and links remain intact.
+        proxy = SMBaseBend.__new__(SMBaseBend)
+        obj.Proxy = proxy
+        obj.touch()
     if proxy is not None and hasattr(proxy, "addVerifyProperties"):
         proxy.addVerifyProperties(obj)
     else:

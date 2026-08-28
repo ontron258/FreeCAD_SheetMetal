@@ -55,6 +55,11 @@ class TestFlatPatternWorkspace(unittest.TestCase):
             source, face_name = resolveUnfoldSource(unfold)
             self.assertIs(source, second)
             self.assertTrue(face_name.startswith("Face"))
+            doc.recompute()
+            self.assertEqual(
+                retargetUnfoldsToPartTip(sheet_part, second, first), []
+            )
+            self.assertNotIn("Touched", unfold.State)
         finally:
             App.closeDocument(doc.Name)
 

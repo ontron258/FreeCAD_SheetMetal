@@ -61,6 +61,9 @@ class SMWorkbench(Workbench):
         import SheetMetalBaseCmd
         import SheetMetalBaseShapeCmd
         import SheetMetalBend
+        import SheetMetalBoltConnectionCmd
+        import SheetMetalConnectedPatternCmd
+        import SheetMetalMirroredPartCmd
         import SheetMetalCmd
         import SheetMetalHem
         import SheetMetalCornerReliefCmd
@@ -96,6 +99,9 @@ class SMWorkbench(Workbench):
             "SheetMetal_AddBend",
             "SheetMetal_SketchOnSheet",
             "SheetMetal_AddCutout",
+            "SheetMetal_BoltConnection",
+            "SheetMetal_ConnectedPartPattern",
+            "SheetMetal_MirroredPart",
             "SheetMetal_Forming",
             ]
 

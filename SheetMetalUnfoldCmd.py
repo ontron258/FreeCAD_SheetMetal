@@ -379,6 +379,8 @@ def retargetUnfoldsToPartTip(sheet_metal_part, new_tip, previous_tip=None):
         _ensure_part_tip_properties(unfold)
         if not unfold.FollowPartTip:
             continue
+        if unfold.FollowedTip is new_tip:
+            continue
         unfold.FollowedTip = new_tip
         unfold.touch()
         updated.append(unfold)
@@ -411,6 +413,11 @@ class _UnfoldPartTipObserver:
 
     def slotActivateDocument(self, doc):
         migrateDocumentUnfoldPartTips(doc)
+        if any(
+            _isUnfoldObject(candidate) and "Touched" in candidate.State
+            for candidate in doc.Objects
+        ):
+            doc.recompute()
 
     def slotChangedObject(self, obj, prop):
         if not (
@@ -817,6 +824,9 @@ class SMUnfold:
 
         """
         self.addVerifyProperties(fp)
+        if fp.ManualRecompute and not SheetMetalTools.smForceRecompute:
+            SheetMetalTools.smAddToRecompute(fp)
+            return
         baseObj, baseFace = resolveUnfoldSource(fp)
         if not NewUnfolderAvailable or SheetMetalTools.use_old_unfolder():
             shape, sketches = self.oldUnfolder(fp, baseObj, baseFace)

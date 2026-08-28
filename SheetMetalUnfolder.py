@@ -108,8 +108,6 @@ import Draft
 import FreeCAD
 import Part
 
-from TechDraw import projectEx
-
 import SheetMetalTools
 from lookup import get_val_from_range
 
@@ -458,16 +456,17 @@ class Simple_node(object):
 
 
 def get_surface(face):
-    # 'searchSubShape' is used to distinguish upstream FreeCAD with
-    # LinkStage3 branch, which has a different implementation
-    # of findPlane().
-    if hasattr(face, "searchSubShape"):
-        try:
-            surface = face.findPlane()
-            if surface:
-                return surface
-        except Exception:
-            pass
+    # FreeCAD variants expose findPlane() through different TopoShape APIs.
+    # Calling it directly when available gives the actual oriented plane even
+    # after a negative-determinant mirror. A valid Part.Plane can also have a
+    # false boolean value when its face contains inner wires, so test against
+    # None rather than truthiness.
+    try:
+        surface = face.findPlane()
+        if surface is not None:
+            return surface
+    except (AttributeError, Part.OCCError):
+        pass
     surface = face.Surface
     if face.Orientation == "Reversed" and isinstance(surface, Part.Plane):
         return Part.Plane(surface.Position, -surface.Axis)
@@ -3100,6 +3099,11 @@ def getUnfoldSketches(
     bendSketchColor="#c00000",
     internalSketchColor="#ff5733",
 ):
+    # TechDraw is only needed when a projected unfold sketch is requested.
+    # Keeping this import local lets solid flat patterns recompute in minimal
+    # FreeCAD runtimes where the optional TechDraw module is unavailable.
+    from TechDraw import projectEx
+
     unfold_sketch = None
 
     # Locate the projection face.

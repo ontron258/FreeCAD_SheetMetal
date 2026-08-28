@@ -32,7 +32,6 @@ from statistics import StatisticsError, mode
 import FreeCAD
 import Part
 from FreeCAD import Matrix, Placement, Rotation, Vector
-from TechDraw import projectEx as project_shape_to_plane
 
 import SheetMetalTools
 import SheetMetalText
@@ -664,6 +663,8 @@ class SketchExtraction:
         """Uses functionality from the TechDraw API to project
         a 3D shape onto a particular 2D plane.
         """
+        from TechDraw import projectEx as project_shape_to_plane
+
         # this is a slow but robust method of sketch profile extraction
         # ref:
         # https://github.com/FreeCAD/FreeCAD/blob/main/src/Mod/Draft/draftobjects/shape2dview.py

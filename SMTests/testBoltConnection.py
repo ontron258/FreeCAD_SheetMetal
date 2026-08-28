@@ -447,7 +447,7 @@ class TestBoltConnection(unittest.TestCase):
             )
             doc.recompute()
 
-            self.assertIs(connection.LocatorOccurrence, occurrence)
+            self.assertEqual(list(connection.OccurrenceProviders), [occurrence])
             self.assertEqual(connection.OccurrenceParticipantName, occurrence.Name)
             self.assertEqual(connection.OccurrenceSourceName, source.Name)
             self.assertEqual(str(connection.OccurrenceMode), "Existing Holes")
@@ -538,7 +538,9 @@ class TestBoltConnection(unittest.TestCase):
             restored = reopened.getObject(connection_name)
             restored_occurrence = reopened.getObject(occurrence_name)
             restored_cut = reopened.getObject(cut_name)
-            self.assertIs(restored.LocatorOccurrence, restored_occurrence)
+            self.assertEqual(
+                list(restored.OccurrenceProviders), [restored_occurrence]
+            )
             self.assertEqual(restored.OccurrenceSourceName, source_name)
             self.assertEqual(str(restored.ConnectionType), "Carriage Bolt")
             self.assertEqual(str(restored_cut.HoleType), "Square")

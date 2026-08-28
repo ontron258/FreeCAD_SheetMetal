@@ -16,10 +16,12 @@ from SheetMetalBoltConnectionCmd import (
 )
 from SheetMetalConnectedPatternCmd import (
     SMConnectedPartPattern,
+    SMConnectedPatternCut,
     create_connected_part_pattern,
     linear_direction_definition,
     polar_axis_definition,
     pattern_transforms,
+    migrate_connected_part_patterns,
     set_parent_pattern,
     sync_connection_participant_patterns,
 )
@@ -60,20 +62,144 @@ def _configured_polar_pattern(doc):
     )
     sketch = doc.addObject("Sketcher::SketchObject", "SeedBoltLocator")
     sketch.addGeometry(Part.Point(App.Vector(10.0, 0.0, 0.0)), False)
-    connection, _seed_cuts = create_bolted_connection(
+    connection, seed_cuts = create_bolted_connection(
         doc, [(sketch, [])], [source, fixed]
     )
     pattern, instance_link, cuts = create_connected_part_pattern(
         doc, source, [connection], "Polar"
     )
+    assert cuts == []
     pattern.PolarCenter = App.Vector(0.0, 0.0, 0.0)
     pattern.PolarAxis = App.Vector(0.0, 0.0, 1.0)
     pattern.TotalAngle = 360.0
     pattern.Closed = True
-    return source, fixed, connection, pattern, instance_link, cuts[0]
+    return source, fixed, connection, pattern, instance_link, seed_cuts[1]
 
 
 class TestConnectedPattern(unittest.TestCase):
+    def test_legacy_pattern_cut_nodes_are_removed_and_links_rewired(self):
+        doc = App.newDocument("ConnectedPatternLegacyMigration")
+        try:
+            source, _source_base = _sheet_part(
+                doc,
+                "LegacySource",
+                Part.makeBox(4.0, 4.0, 2.0, App.Vector(-2.0, -2.0, 0.0)),
+            )
+            target, _target_base = _sheet_part(
+                doc,
+                "LegacyTarget",
+                Part.makeBox(30.0, 10.0, 2.0, App.Vector(-5.0, -5.0, 0.0)),
+                App.Placement(App.Vector(0.0, 0.0, 6.0), App.Rotation()),
+            )
+            sketch = doc.addObject("Sketcher::SketchObject", "LegacyLocator")
+            sketch.addGeometry(Part.Point(App.Vector(0.0, 0.0, 0.0)), False)
+            connection, cuts = create_bolted_connection(
+                doc, [(sketch, [])], [source, target]
+            )
+            pattern, _link, _new_cuts = create_connected_part_pattern(
+                doc, source, [connection], "Linear"
+            )
+            pattern.LinearDirection = App.Vector(1.0, 0.0, 0.0)
+            pattern.Occurrences = 2
+            pattern.Spacing = 10.0
+
+            direct_cut = cuts[1]
+            legacy = doc.addObject("Part::FeaturePython", "LegacyPatternCut")
+            target.addObject(legacy)
+            SMConnectedPatternCut(
+                legacy, pattern, direct_cut, [direct_cut], target
+            )
+            target.Tip = legacy.Name
+            pattern.addProperty(
+                "App::PropertyStringList", "PatternCutNames", "Legacy"
+            )
+            pattern.PatternCutNames = [legacy.Name]
+            follower = doc.addObject("Part::FeaturePython", "LegacyFollower")
+            follower.addProperty("App::PropertyLink", "FollowedTip")
+            follower.FollowedTip = legacy
+            doc.recompute()
+            legacy_name = legacy.Name
+
+            removed = migrate_connected_part_patterns(doc)
+
+            self.assertEqual(removed, 1)
+            self.assertIsNone(doc.getObject(legacy_name))
+            self.assertEqual(target.Tip, direct_cut.Name)
+            self.assertIs(follower.FollowedTip, direct_cut)
+            self.assertNotIn("PatternCutNames", pattern.PropertiesList)
+            self.assertEqual(direct_cut.LastError, "")
+            self.assertTrue(direct_cut.Shape.isValid())
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_sibling_patterns_share_one_deduplicated_connection_cut_path(self):
+        doc = App.newDocument("ConnectedPatternSiblingProviders")
+        try:
+            source, _source_base = _sheet_part(
+                doc,
+                "ReusableBracket",
+                Part.makeBox(4.0, 4.0, 2.0, App.Vector(-2.0, -2.0, 0.0)),
+            )
+            target, _target_base = _sheet_part(
+                doc,
+                "SharedPanel",
+                Part.makeBox(70.0, 10.0, 2.0, App.Vector(-5.0, -5.0, 0.0)),
+                App.Placement(App.Vector(0.0, 0.0, 6.0), App.Rotation()),
+            )
+            sketch = doc.addObject("Sketcher::SketchObject", "BracketLocator")
+            sketch.addGeometry(Part.Point(App.Vector(0.0, 0.0, 0.0)), False)
+            connection, cuts = create_bolted_connection(
+                doc, [(sketch, [])], [source, target]
+            )
+            parent, _parent_link, parent_cuts = create_connected_part_pattern(
+                doc, source, [connection], "Linear"
+            )
+            parent.LinearDirection = App.Vector(1.0, 0.0, 0.0)
+            parent.Occurrences = 2
+            parent.Spacing = 10.0
+            branch_a, _branch_a_link, branch_a_cuts = create_connected_part_pattern(
+                doc, source, [connection], "Linear", parent_pattern=parent
+            )
+            branch_a.LinearDirection = App.Vector(1.0, 0.0, 0.0)
+            branch_a.Occurrences = 2
+            branch_a.Spacing = 20.0
+            branch_b, _branch_b_link, branch_b_cuts = create_connected_part_pattern(
+                doc, source, [connection], "Linear", parent_pattern=parent
+            )
+            branch_b.LinearDirection = App.Vector(1.0, 0.0, 0.0)
+            branch_b.Occurrences = 2
+            branch_b.Spacing = 40.0
+            doc.recompute()
+
+            self.assertEqual(parent_cuts, [])
+            self.assertEqual(branch_a_cuts, [])
+            self.assertEqual(branch_b_cuts, [])
+            self.assertEqual(
+                list(connection.OccurrenceProviders), [branch_a, branch_b]
+            )
+            self.assertEqual(connection.LocatorCount, 6)
+            self.assertNotIn("Connections", parent.PropertiesList)
+            self.assertEqual(parent.ConnectionNames, [connection.Name])
+            self.assertEqual(
+                [
+                    obj
+                    for obj in doc.Objects
+                    if getattr(obj, "SheetMetalType", "")
+                    == "ConnectedPatternCut"
+                ],
+                [],
+            )
+            target_cut = cuts[1]
+            diameter = 0.344 * 25.4
+            expected_removed = 6.0 * math.pi * (diameter * 0.5) ** 2 * 2.0
+            self.assertAlmostEqual(
+                target_cut.RemovedVolume.Value, expected_removed, places=4
+            )
+            self.assertEqual(target_cut.AggregateContributorCount, 1)
+            self.assertEqual(target_cut.LastError, "")
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_add_participant_extends_existing_pattern_chain(self):
         doc = App.newDocument("ConnectedPatternAddParticipant")
         try:
@@ -123,18 +249,14 @@ class TestConnectedPattern(unittest.TestCase):
 
             self.assertEqual(len(added), 1)
             self.assertEqual(added[0].LocatorKeys, [])
-            self.assertEqual(len(patterned), 2)
-            self.assertIs(patterned[0].PreviousFeature, added[0])
-            self.assertIs(patterned[1].PreviousFeature, patterned[0])
+            self.assertEqual(patterned, [])
             self.assertIn(inner.Name, connection.ParticipantNames)
-            self.assertEqual(inner.Tip, patterned[1].Name)
-            self.assertAlmostEqual(patterned[0].RemovedVolume.Value, 0.0)
-            self.assertAlmostEqual(patterned[0].Shape.Volume, inner_base.Shape.Volume)
-            self.assertGreater(patterned[1].RemovedVolume.Value, 0.0)
-            self.assertLess(patterned[1].Shape.Volume, inner_base.Shape.Volume)
-            self.assertEqual(patterned[1].AggregateContributorCount, 3)
-            self.assertEqual(patterned[0].LastError, "")
-            self.assertEqual(patterned[1].LastError, "")
+            self.assertEqual(inner.Tip, added[0].Name)
+            self.assertEqual(str(added[0].OccurrenceScope), "All Occurrences")
+            self.assertGreater(added[0].RemovedVolume.Value, 0.0)
+            self.assertLess(added[0].Shape.Volume, inner_base.Shape.Volume)
+            self.assertEqual(added[0].AggregateContributorCount, 1)
+            self.assertEqual(added[0].LastError, "")
         finally:
             App.closeDocument(doc.Name)
 
@@ -175,21 +297,18 @@ class TestConnectedPattern(unittest.TestCase):
             pattern, _link, cuts = create_connected_part_pattern(
                 doc, source, [connection], "Linear"
             )
+            self.assertEqual(cuts, [])
             pattern.LinearDirection = App.Vector(1.0, 0.0, 0.0)
             pattern.Occurrences = 2
             pattern.Spacing = 10.0
             doc.recompute()
 
-            target_cut = next(
-                cut for cut in cuts if cut.ParticipantName == target.Name
-            )
-            missed_cut = next(
-                cut for cut in cuts if cut.ParticipantName == missed.Name
-            )
+            target_cut = seed_cuts[1]
+            missed_cut = seed_cuts[2]
             self.assertGreater(target_cut.RemovedVolume.Value, 0.0)
             self.assertEqual(target_cut.LastError, "")
             self.assertAlmostEqual(missed_cut.RemovedVolume.Value, 0.0)
-            self.assertEqual(missed_cut.SkippedLocationCount, 1)
+            self.assertEqual(missed_cut.SkippedLocationCount, 2)
             self.assertEqual(missed_cut.LastError, "")
         finally:
             App.closeDocument(doc.Name)
@@ -228,19 +347,18 @@ class TestConnectedPattern(unittest.TestCase):
             pattern, _link, cuts = create_connected_part_pattern(
                 doc, source, [connection], "Linear"
             )
+            self.assertEqual(cuts, [])
             pattern.LinearDirection = App.Vector(1.0, 0.0, 0.0)
             pattern.Occurrences = 2
             pattern.Spacing = 50.0
             doc.recompute()
 
-            panel_cut = next(
-                cut for cut in cuts if cut.ParticipantName == target.Name
-            )
-            self.assertEqual(connection.BoltCount, 1)
-            self.assertEqual(connection.AuxiliaryHoleCount, 1)
+            panel_cut = target_cut
+            self.assertEqual(connection.BoltCount, 2)
+            self.assertEqual(connection.AuxiliaryHoleCount, 2)
             self.assertEqual(source_cut.LastError, "")
             self.assertGreater(source_cut.RemovedVolume.Value, 0.0)
-            self.assertEqual(panel_cut.SkippedLocationCount, 0)
+            self.assertEqual(panel_cut.SkippedLocationCount, 2)
             self.assertEqual(panel_cut.LastError, "")
             self.assertGreater(
                 panel_cut.RemovedVolume.Value,
@@ -282,8 +400,10 @@ class TestConnectedPattern(unittest.TestCase):
             self.assertEqual(len(pattern_transforms(child)), 4)
             self.assertEqual(child.AdditionalOccurrences, 4)
             self.assertEqual(child_link.ElementCount, 4)
-            self.assertIs(child_cuts[0].PreviousFeature, parent_cut)
-            self.assertEqual(child_cuts[0].LastError, "")
+            self.assertEqual(child_cuts, [])
+            self.assertEqual(list(connection.OccurrenceProviders), [child])
+            self.assertEqual(str(parent_cut.OccurrenceScope), "All Occurrences")
+            self.assertEqual(parent_cut.LastError, "")
 
             set_parent_pattern(child, None)
             doc.recompute()
@@ -422,7 +542,7 @@ class TestConnectedPattern(unittest.TestCase):
             pattern.Occurrences = 4
             doc.recompute()
 
-            self.assertEqual(connection.BoltCount, 1)
+            self.assertEqual(connection.BoltCount, 4)
             self.assertEqual(pattern.AdditionalOccurrences, 3)
             self.assertEqual(pattern.ConnectionInstanceCount, 4)
             self.assertEqual(instance_link.ElementCount, 3)
@@ -433,15 +553,8 @@ class TestConnectedPattern(unittest.TestCase):
             diameter = 0.344 * 25.4
             expected_removed = 4.0 * math.pi * (diameter * 0.5) ** 2 * 2.0
             self.assertAlmostEqual(cut.RemovedVolume.Value, expected_removed, places=4)
-            self.assertEqual(cut.AggregateContributorCount, 2)
-            direct_fixed_cut = next(
-                feature
-                for feature in connection_cuts(connection)
-                if feature.ParticipantName == _fixed.Name
-            )
-            self.assertAlmostEqual(direct_fixed_cut.RemovedVolume.Value, 0.0)
-            self.assertAlmostEqual(direct_fixed_cut.Shape.Volume, 30.0 * 30.0 * 2.0)
-            self.assertEqual(direct_fixed_cut.AggregateContributorCount, 0)
+            self.assertEqual(cut.AggregateContributorCount, 1)
+            self.assertEqual(str(cut.OccurrenceScope), "All Occurrences")
 
             centers = [
                 element.Shape.BoundBox.Center for element in instance_link.ElementList
@@ -493,7 +606,7 @@ class TestConnectedPattern(unittest.TestCase):
             diameter = 0.344 * 25.4
             seed_removed = math.pi * (diameter * 0.5) ** 2 * 2.0
             self.assertAlmostEqual(cut.RemovedVolume.Value, seed_removed, places=4)
-            self.assertEqual(cut.AggregateContributorCount, 2)
+            self.assertEqual(cut.AggregateContributorCount, 1)
         finally:
             App.closeDocument(doc.Name)
 
@@ -521,7 +634,7 @@ class TestConnectedPattern(unittest.TestCase):
             self.assertEqual(restored_pattern.ConnectionInstanceCount, 5)
             self.assertTrue(restored_cut.Shape.isValid())
             self.assertGreater(restored_cut.RemovedVolume.Value, 0.0)
-            self.assertEqual(restored_cut.AggregateContributorCount, 2)
+            self.assertEqual(restored_cut.AggregateContributorCount, 1)
         finally:
             if App.ActiveDocument is not None:
                 App.closeDocument(App.ActiveDocument.Name)

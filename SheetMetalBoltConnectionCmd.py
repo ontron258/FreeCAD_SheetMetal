@@ -125,17 +125,38 @@ def _transformed_frame(world_frame, transform):
     )
 
 
+def _locator_occurrences(connection):
+    """Return the objects providing placed locator occurrences."""
+    providers = list(getattr(connection, "OccurrenceProviders", []))
+    if providers:
+        return [provider for provider in providers if provider is not None]
+    legacy = getattr(connection, "LocatorOccurrence", None)
+    if isinstance(legacy, tuple):
+        legacy = legacy[0]
+    return [legacy] if legacy is not None else []
+
+
 def _locator_occurrence(connection):
-    """Return the optional single App::Link carrying the locator definition."""
-    occurrence = getattr(connection, "LocatorOccurrence", None)
-    if isinstance(occurrence, tuple):
-        occurrence = occurrence[0]
-    return occurrence
+    """Return the first occurrence provider for compact UI compatibility."""
+    providers = _locator_occurrences(connection)
+    return providers[0] if providers else None
 
 
 def _linked_sheet_metal_part(occurrence):
-    """Resolve the Sheet Metal Part definition referenced by one App::Link."""
-    if occurrence is None or getattr(occurrence, "TypeId", "") != "App::Link":
+    """Resolve the Sheet Metal Part definition referenced by a provider."""
+    if occurrence is None:
+        return None
+    if getattr(occurrence, "SheetMetalType", "") == "ConnectedPartPattern":
+        name = str(getattr(occurrence, "SourcePartName", ""))
+        source = occurrence.Document.getObject(name) if name else None
+        if (
+            source is not None
+            and source.TypeId == "App::Part"
+            and getattr(source, "SheetMetalType", "") == "Part"
+        ):
+            return source
+        return None
+    if getattr(occurrence, "TypeId", "") != "App::Link":
         return None
     linked = getattr(occurrence, "LinkedObject", None)
     if (
@@ -177,6 +198,68 @@ def _occurrence_delta_placement(occurrence):
             raise ValueError("The locator occurrence has no Sheet Metal Part source.")
         placement = placement.multiply(source_part.getGlobalPlacement().inverse())
     return placement
+
+
+def _occurrence_transforms(occurrence, include_seed=True):
+    """Return locator delta placements published by an occurrence provider."""
+    if occurrence is None:
+        return [FreeCAD.Placement()]
+    if getattr(occurrence, "TypeId", "") == "App::Link":
+        return [_occurrence_delta_placement(occurrence)]
+    if getattr(occurrence, "SheetMetalType", "") == "ConnectedPartPattern":
+        provider = getattr(occurrence, "Proxy", None)
+        resolver = getattr(provider, "occurrenceTransforms", None)
+        if resolver is None:
+            raise ValueError(
+                "The connected pattern cannot publish occurrence transforms."
+            )
+        transforms = list(resolver(occurrence, include_seed))
+        if not transforms:
+            raise ValueError("The connected pattern has no occurrences.")
+        return transforms
+    raise ValueError(
+        "The locator occurrence must be an App::Link or Connected Part Pattern."
+    )
+
+
+def _is_pattern_occurrence_provider(occurrence):
+    return (
+        occurrence is not None
+        and getattr(occurrence, "SheetMetalType", "") == "ConnectedPartPattern"
+    )
+
+
+def _placement_key(placement):
+    quaternion = placement.Rotation.Q
+    return tuple(
+        round(value, 9)
+        for value in (
+            placement.Base.x,
+            placement.Base.y,
+            placement.Base.z,
+            quaternion[0],
+            quaternion[1],
+            quaternion[2],
+            quaternion[3],
+        )
+    )
+
+
+def _connection_occurrence_transforms(connection):
+    """Return a deduplicated union of every provider's complete occurrence set."""
+    providers = _locator_occurrences(connection)
+    if not providers:
+        return [(FreeCAD.Placement(), None)]
+    transforms = []
+    seen = set()
+    for provider in providers:
+        for transform in _occurrence_transforms(provider, include_seed=True):
+            key = _placement_key(transform)
+            if key in seen:
+                continue
+            seen.add(key)
+            transforms.append((transform, provider))
+    return transforms
 
 
 def round_clearance_diameter(size, fit):
@@ -295,8 +378,8 @@ def _subelement_record(sketch, sub_name):
     }
 
 
-def locator_candidates(connection):
-    """Return every referenced locator, including disabled whole-sketch ones."""
+def definition_locator_candidates(connection):
+    """Return referenced locators in the source definition's world space."""
     records = []
     for sketch, sub_names in connection.LocatorReferences:
         if sketch is None or not sketch.isDerivedFrom("Sketcher::SketchObject"):
@@ -309,26 +392,66 @@ def locator_candidates(connection):
             )
         else:
             records.extend(_geometry_candidates(sketch))
-    occurrence = _locator_occurrence(connection)
-    if occurrence is not None:
-        transform = _occurrence_delta_placement(occurrence)
-        records = [
-            dict(record, frame=_transformed_frame(record["frame"], transform))
-            for record in records
-        ]
     return records
 
 
-def locator_records(connection):
-    """Resolve enabled locator keys, labels, and world-space frames."""
+def locator_candidates(connection):
+    """Return every physical locator published by the connection provider."""
+    definitions = definition_locator_candidates(connection)
+    occurrences = _locator_occurrences(connection)
+    if not occurrences:
+        return [dict(record, occurrence_index=0, definition=True) for record in definitions]
+    transforms = _connection_occurrence_transforms(connection)
+    records = []
+    for occurrence_index, (transform, provider) in enumerate(transforms):
+        for definition in definitions:
+            label = definition["label"]
+            if len(transforms) > 1:
+                label = "{} — occurrence {}".format(label, occurrence_index + 1)
+            records.append(
+                dict(
+                    definition,
+                    label=label,
+                    frame=_transformed_frame(definition["frame"], transform),
+                    occurrence_index=occurrence_index,
+                    definition=(
+                        _is_pattern_occurrence_provider(provider)
+                        and _placement_key(transform) == _placement_key(FreeCAD.Placement())
+                    ),
+                )
+            )
+    return records
+
+
+def _enabled_locator_records(connection, candidates):
     filter_keys = set(getattr(connection, "LocatorGeometryFilter", []))
-    records = [
+    return [
         record
-        for record in locator_candidates(connection)
+        for record in candidates
         if not record["filterable"]
         or not filter_keys
         or record["key"] in filter_keys
     ]
+
+
+def locator_records(connection):
+    """Resolve enabled locator keys, labels, and world-space frames."""
+    records = _enabled_locator_records(connection, locator_candidates(connection))
+    if not records:
+        raise ValueError(
+            translate(
+                "SheetMetal",
+                "No sketch points or circular sketch edges define this connection.",
+            )
+        )
+    return records
+
+
+def definition_locator_records(connection):
+    """Resolve enabled locators without applying an occurrence provider."""
+    records = _enabled_locator_records(
+        connection, definition_locator_candidates(connection)
+    )
     if not records:
         raise ValueError(
             translate(
@@ -349,7 +472,12 @@ def cut_locator_records(cut):
     connection = connection_for_cut(cut)
     if connection is None:
         raise ValueError("The bolted connection reference is missing.")
-    records = locator_records(connection)
+    scope = str(getattr(cut, "OccurrenceScope", "All Occurrences"))
+    records = (
+        definition_locator_records(connection)
+        if scope == "Definition Only"
+        else locator_records(connection)
+    )
     if cut.UseAllLocators:
         return records
     keys = set(cut.LocatorKeys)
@@ -820,10 +948,13 @@ class SMBoltConnection:
         if participant_names is not None:
             obj.ParticipantNames = participant_names
         if locator_occurrence is not None:
-            obj.LocatorOccurrence = locator_occurrence
+            obj.OccurrenceProviders = [locator_occurrence]
         obj.Proxy = self
 
     def addVerifyProperties(self, obj):
+        legacy_occurrence = getattr(obj, "LocatorOccurrence", None)
+        if isinstance(legacy_occurrence, tuple):
+            legacy_occurrence = legacy_occurrence[0]
         if "SheetMetalType" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyString", "SheetMetalType", "Bolted Connection",
@@ -846,16 +977,21 @@ class SMBoltConnection:
                     "Included whole-sketch geometry keys; empty includes every locator",
                 ),
             )
-        if "LocatorOccurrence" not in obj.PropertiesList:
+        if "OccurrenceProviders" not in obj.PropertiesList:
             obj.addProperty(
-                "App::PropertyXLink",
-                "LocatorOccurrence",
+                "App::PropertyXLinkList",
+                "OccurrenceProviders",
                 "Bolted Connection",
                 translate(
                     "App::Property",
-                    "Optional placed App::Link carrying the locator sketch",
+                    "Links or connected patterns providing placed locators",
                 ),
             )
+        if legacy_occurrence is not None and not list(obj.OccurrenceProviders):
+            obj.OccurrenceProviders = [legacy_occurrence]
+        if "LocatorOccurrence" in obj.PropertiesList:
+            obj.LocatorOccurrence = None
+            obj.removeProperty("LocatorOccurrence")
         if "OccurrenceParticipantName" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyString",
@@ -990,24 +1126,29 @@ class SMBoltConnection:
     def execute(self, fp):
         self.addVerifyProperties(fp)
         try:
-            occurrence = _locator_occurrence(fp)
-            if occurrence is None:
+            occurrences = _locator_occurrences(fp)
+            if not occurrences:
                 fp.OccurrenceParticipantName = ""
                 fp.OccurrenceParticipantLabel = ""
                 fp.OccurrenceSourceName = ""
                 fp.OccurrenceState = "Definition coordinates"
             else:
-                source_part = _linked_sheet_metal_part(occurrence)
-                if source_part is None:
-                    raise ValueError(
-                        "The locator occurrence must link a Sheet Metal Part."
-                    )
-                _occurrence_delta_placement(occurrence)
-                fp.OccurrenceParticipantName = occurrence.Name
-                fp.OccurrenceParticipantLabel = occurrence.Label
+                sources = [_linked_sheet_metal_part(item) for item in occurrences]
+                if any(source is None for source in sources):
+                    raise ValueError("An occurrence provider has no Sheet Metal Part source.")
+                if any(source is not sources[0] for source in sources[1:]):
+                    raise ValueError("All occurrence providers must repeat the same part.")
+                source_part = sources[0]
+                transforms = _connection_occurrence_transforms(fp)
+                fp.OccurrenceParticipantName = ",".join(
+                    occurrence.Name for occurrence in occurrences
+                )
+                fp.OccurrenceParticipantLabel = ", ".join(
+                    occurrence.Label for occurrence in occurrences
+                )
                 fp.OccurrenceSourceName = source_part.Name
-                fp.OccurrenceState = "Resolved from {} ({})".format(
-                    occurrence.Label, fp.OccurrenceMode
+                fp.OccurrenceState = "Resolved {} occurrence(s) from {} ({})".format(
+                    len(transforms), fp.OccurrenceParticipantLabel, fp.OccurrenceMode
                 )
             records = locator_records(fp)
             hole_only = set(fp.HoleOnlyLocatorKeys)
@@ -1106,6 +1247,17 @@ class SMBoltConnectionCut:
             )
         _set_enumeration(
             obj,
+            "OccurrenceScope",
+            ["All Occurrences", "Definition Only"],
+            "All Occurrences",
+            "Participant",
+            translate(
+                "App::Property",
+                "Use every placed occurrence or only the source definition locators",
+            ),
+        )
+        _set_enumeration(
+            obj,
             "CutMode",
             PARTICIPANT_CUT_MODES,
             "Cut",
@@ -1173,6 +1325,17 @@ class SMBoltConnectionCut:
                 translate("App::Property", "Volume removed by this connection"),
             )
             obj.setEditorMode("RemovedVolume", 1)
+        if "SkippedLocationCount" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyInteger",
+                "SkippedLocationCount",
+                "Result",
+                translate(
+                    "App::Property",
+                    "Placed locations rejected before a Boolean was attempted",
+                ),
+            )
+            obj.setEditorMode("SkippedLocationCount", 1)
         if "AggregateContributorCount" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyInteger",
@@ -1211,6 +1374,12 @@ class SMBoltConnectionCut:
         slot_length = fp.SlotLength.Value
         rotation = math.radians(fp.Rotation.Value)
         cutter_records = []
+        skipped = 0
+        providers = _locator_occurrences(connection)
+        skip_non_intersections = (
+            any(_is_pattern_occurrence_provider(item) for item in providers)
+            and str(fp.OccurrenceScope) == "All Occurrences"
+        )
         for record in cut_locator_records(fp):
             world_frame = record["frame"]
             local = _local_frame(fp, world_frame)
@@ -1223,6 +1392,20 @@ class SMBoltConnectionCut:
                 x_axis = _scaled(x_axis, math.cos(rotation)).add(
                     _scaled(y_axis, math.sin(rotation))
                 )
+            profile_length = max(
+                width,
+                slot_length
+                if slot_length > SheetMetalTools.smEpsilon
+                else width,
+            )
+            if skip_non_intersections and not axis_intersects_shape_bounds(
+                base_shape,
+                local["point"],
+                local["z_axis"],
+                profile_length * 0.5,
+            ):
+                skipped += 1
+                continue
             depth = _feature_depth(base_shape, local["point"])
             cutter = make_hole_cutter(
                 fp.HoleType,
@@ -1247,16 +1430,16 @@ class SMBoltConnectionCut:
                     )
                 )
             fp.ValidationState = "Existing holes confirmed"
-            return [], 0
+            return [], skipped
         fp.ValidationState = "Cut"
         return [
             {
                 "cut_extent": str(fp.CutExtent),
                 "records": cutter_records,
-                "skip_non_intersections": False,
-                "validate_through": True,
+                "skip_non_intersections": skip_non_intersections,
+                "validate_through": not skip_non_intersections,
             }
-        ], 0
+        ], skipped
 
     def execute(self, fp):
         self.addVerifyProperties(fp)
@@ -1284,15 +1467,17 @@ def _default_profile(connection_type, index):
 
 
 def _validate_locator_occurrence(doc, locator_references, occurrence):
-    """Validate one placed source occurrence and its definition-space sketches."""
+    """Validate one occurrence provider and its definition-space sketches."""
     if occurrence is None:
         return None
     if occurrence.Document is not doc:
         raise ValueError("The locator occurrence must be in the active document.")
-    _occurrence_delta_placement(occurrence)
+    _occurrence_transforms(occurrence, include_seed=True)
     source_part = _linked_sheet_metal_part(occurrence)
     if source_part is None:
-        raise ValueError("The locator occurrence must link a Sheet Metal Part.")
+        raise ValueError("The occurrence provider has no Sheet Metal Part source.")
+    if _is_pattern_occurrence_provider(occurrence):
+        return source_part
     for sketch, _sub_names in locator_references:
         owner = _find_sheet_metal_part(sketch)
         if owner is not source_part:
@@ -1302,6 +1487,69 @@ def _validate_locator_occurrence(doc, locator_references, occurrence):
                 )
             )
     return source_part
+
+
+def set_connection_occurrence_providers(connection, providers, source_part=None):
+    """Make one connection consume a unified set of occurrence providers.
+
+    The source manufactured part retains only its definition-space cut. Every
+    other participant consumes the provider's complete occurrence set.
+    """
+    unique = []
+    for provider in providers or []:
+        if provider is not None and provider not in unique:
+            unique.append(provider)
+    if not unique:
+        connection.OccurrenceProviders = []
+        for cut in connection_cuts(connection):
+            cut.OccurrenceScope = "All Occurrences"
+            cut.touch()
+        connection.touch()
+        return
+    resolved_sources = [
+        _validate_locator_occurrence(
+            connection.Document,
+            list(connection.LocatorReferences),
+            provider,
+        )
+        for provider in unique
+    ]
+    resolved_source = resolved_sources[0]
+    if any(resolved is not resolved_source for resolved in resolved_sources[1:]):
+        raise ValueError("All occurrence providers must repeat the same part.")
+    if source_part is not None and resolved_source is not source_part:
+        raise ValueError(
+            "The occurrence provider does not repeat {}.".format(source_part.Label)
+        )
+    connection.OccurrenceProviders = unique
+    connection.OccurrenceParticipantName = ",".join(item.Name for item in unique)
+    connection.OccurrenceParticipantLabel = ", ".join(item.Label for item in unique)
+    connection.OccurrenceSourceName = resolved_source.Name
+    for cut in connection_cuts(connection):
+        is_definition_part = cut.ParticipantName == resolved_source.Name
+        cut.OccurrenceScope = (
+            "Definition Only" if is_definition_part else "All Occurrences"
+        )
+        if (
+            not is_definition_part
+            and not cut.UseAllLocators
+            and not list(cut.LocatorKeys)
+        ):
+            # A future target may miss every seed locator but intersect later
+            # occurrences. Let broad-phase filtering decide which placements cut.
+            cut.UseAllLocators = True
+        cut.touch()
+    set_default_participant_roles(connection)
+    connection.touch()
+
+
+def set_connection_occurrence_provider(connection, provider, source_part=None):
+    """Compatibility wrapper for assigning one occurrence provider."""
+    set_connection_occurrence_providers(
+        connection,
+        [] if provider is None else [provider],
+        source_part,
+    )
 
 
 def create_bolted_connection(
@@ -1506,7 +1754,10 @@ def sync_common_participants(connection):
 def set_default_participant_roles(connection):
     """Assign Head/Intermediate/Nut defaults from common-part membership."""
     cuts = connection_cuts(connection)
-    if _locator_occurrence(connection) is not None:
+    occurrences = _locator_occurrences(connection)
+    if occurrences and not any(
+        _is_pattern_occurrence_provider(item) for item in occurrences
+    ):
         connection.OccurrenceRole = "Head Side"
         for cut in cuts:
             cut.Role = "Nut Side"
@@ -1587,15 +1838,18 @@ if SheetMetalTools.isGuiLoaded():
             form_layout.addRow(translate("SheetMetal", "Connection type"), self.connection_type)
             form_layout.addRow(translate("SheetMetal", "Bolt size"), self.bolt_size)
             form_layout.addRow(translate("SheetMetal", "Common fit"), self.fit)
-            occurrence = _locator_occurrence(obj)
+            occurrences = _locator_occurrences(obj)
             self.occurrence_mode = None
             self.occurrence_role = None
-            if occurrence is not None:
-                occurrence_label = QtGui.QLabel(occurrence.Label)
+            if occurrences:
+                occurrence_label = QtGui.QLabel(
+                    ", ".join(occurrence.Label for occurrence in occurrences)
+                )
                 occurrence_label.setToolTip(
                     translate(
                         "SheetMetal",
-                        "Locator points are transformed by this placed App::Link.",
+                        "Locator points use the deduplicated transforms published "
+                        "by these occurrence providers.",
                     )
                 )
                 self.occurrence_mode = QtGui.QComboBox()
@@ -1605,7 +1859,8 @@ if SheetMetalTools.isGuiLoaded():
                 self.occurrence_role.addItems(PARTICIPANT_ROLES)
                 self.occurrence_role.setCurrentText(str(obj.OccurrenceRole))
                 form_layout.addRow(
-                    translate("SheetMetal", "Placed occurrence"), occurrence_label
+                    translate("SheetMetal", "Occurrence provider(s)"),
+                    occurrence_label,
                 )
                 form_layout.addRow(
                     translate("SheetMetal", "Occurrence action"), self.occurrence_mode

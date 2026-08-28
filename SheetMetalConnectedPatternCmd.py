@@ -14,15 +14,14 @@
 #
 ########################################################################
 
-"""Pattern a sheet-metal product and its cross-part bolted connections.
+"""Pattern sheet-metal occurrences consumed by cross-part connections.
 
-The source Sheet Metal Part remains the seed occurrence.  A single App::Link
-array presents the additional occurrences.  Every non-repeated participant in
-the selected bolted connections receives one downstream cut feature containing
-all transformed bolt holes.
+The source Sheet Metal Part remains the manufactured definition. An App::Link
+array presents additional occurrences, while the existing participant-specific
+bolted cuts consume a deduplicated union of terminal pattern branches. No
+separate patterned-hole feature is created for new patterns.
 """
 
-import math
 import os
 
 import FreeCAD
@@ -30,20 +29,16 @@ import Part
 
 import SheetMetalTools
 from SheetMetalBoltConnectionCmd import (
-    _effective_width,
-    _feature_depth,
     _find_sheet_metal_part,
-    _frame,
-    _local_frame,
     _scaled,
     _target_tip,
     _unit,
-    axis_intersects_shape_bounds,
+    SMBoltConnectionCut,
     connection_for_cut,
     connection_cuts,
+    definition_locator_records,
     execute_aggregate_connection_cut,
-    locator_records,
-    make_hole_cutter,
+    set_connection_occurrence_providers,
 )
 
 
@@ -265,14 +260,6 @@ def pattern_transforms(pattern, include_seed=False):
     return _pattern_transforms(pattern, include_seed, set())
 
 
-def _transformed_frame(world_frame, transform):
-    return _frame(
-        transform.multVec(world_frame["point"]),
-        transform.Rotation.multVec(world_frame["x_axis"]),
-        transform.Rotation.multVec(world_frame["z_axis"]),
-    )
-
-
 def _pattern_group(doc):
     group = doc.getObject("ConnectedPartPatterns")
     if group is None:
@@ -287,6 +274,69 @@ def _pattern_source_part(pattern):
 
 def _pattern_instance_link(pattern):
     return pattern.Document.getObject(pattern.InstanceLinkName)
+
+
+def _pattern_connection_names(pattern):
+    names = list(getattr(pattern, "ConnectionNames", []))
+    if names:
+        return names
+    return [
+        connection.Name
+        for connection in list(getattr(pattern, "Connections", []))
+        if connection is not None
+    ]
+
+
+def pattern_connections(pattern):
+    """Resolve the connections repeated by a pattern without object back-links."""
+    return [
+        connection
+        for connection in (
+            pattern.Document.getObject(name)
+            for name in _pattern_connection_names(pattern)
+        )
+        if connection is not None
+        and getattr(connection, "SheetMetalType", "") == "BoltConnection"
+    ]
+
+
+def _pattern_depth(pattern, visited=None):
+    visited = set() if visited is None else set(visited)
+    if pattern.Name in visited:
+        return 0
+    visited.add(pattern.Name)
+    parent = _parent_pattern(pattern)
+    return 0 if parent is None else 1 + _pattern_depth(parent, visited)
+
+
+def _leaf_patterns_for_connection(connection):
+    """Return every terminal pattern branch containing one connection."""
+    candidates = [
+        obj
+        for obj in connection.Document.Objects
+        if getattr(obj, "SheetMetalType", "") == "ConnectedPartPattern"
+        and connection.Name in _pattern_connection_names(obj)
+    ]
+    if not candidates:
+        return []
+    order = {obj.Name: index for index, obj in enumerate(connection.Document.Objects)}
+    parents = {
+        parent
+        for parent in (_parent_pattern(candidate) for candidate in candidates)
+        if parent in candidates
+    }
+    return sorted(
+        [candidate for candidate in candidates if candidate not in parents],
+        key=lambda item: (_pattern_depth(item), order[item.Name]),
+    )
+
+
+def _activate_pattern_connections(pattern):
+    for connection in pattern_connections(pattern):
+        providers = _leaf_patterns_for_connection(connection)
+        set_connection_occurrence_providers(
+            connection, providers, _pattern_source_part(pattern)
+        )
 
 
 def _pattern_for_cut(cut):
@@ -313,24 +363,6 @@ def _source_cuts_for_pattern_cut(cut):
     return list(getattr(cut, "SourceCuts", []))
 
 
-def _moving_locator_records(pattern, connection):
-    """Return connection locators carried by the repeated source occurrence.
-
-    A locator can intentionally cut only a fixed participant, such as the fifth
-    panel hole beside a four-bolt adjustable foot.  It still belongs to the
-    connection pattern even when it is excluded from the source part's cut.
-    """
-    source_part = _pattern_source_part(pattern)
-    if source_part is None:
-        raise ValueError("The connected pattern source part is missing.")
-    for cut in connection_cuts(connection):
-        if cut.ParticipantName == source_part.Name:
-            return locator_records(connection)
-    raise ValueError(
-        "{} has no seed cut in {}.".format(source_part.Label, connection.Label)
-    )
-
-
 def _property_expression(obj, property_name):
     for name, expression in obj.ExpressionEngine:
         if name == property_name:
@@ -355,7 +387,7 @@ class SMConnectedPartPattern:
             obj.SourcePartName = source_part.Name
             obj.SourcePartLabel = source_part.Label
         if connections is not None:
-            obj.Connections = connections
+            obj.ConnectionNames = [connection.Name for connection in connections]
         if instance_link is not None:
             obj.InstanceLinkName = instance_link.Name
         if center is not None:
@@ -365,6 +397,7 @@ class SMConnectedPartPattern:
         obj.Proxy = self
 
     def addVerifyProperties(self, obj):
+        legacy_connections = list(getattr(obj, "Connections", []))
         if "SheetMetalType" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyString",
@@ -389,13 +422,26 @@ class SMConnectedPartPattern:
                 translate("App::Property", "Label of the repeated part"),
             )
             obj.setEditorMode("SourcePartLabel", 1)
-        if "Connections" not in obj.PropertiesList:
+        if "ConnectionNames" not in obj.PropertiesList:
             obj.addProperty(
-                "App::PropertyLinkList",
-                "Connections",
+                "App::PropertyStringList",
+                "ConnectionNames",
                 "Connected Pattern",
-                translate("App::Property", "Seed bolted connections to repeat"),
+                translate(
+                    "App::Property",
+                    "Internal names of bolted connections using this occurrence set",
+                ),
             )
+            obj.setEditorMode("ConnectionNames", 1)
+        if legacy_connections:
+            obj.ConnectionNames = [
+                connection.Name
+                for connection in legacy_connections
+                if connection is not None
+            ]
+        if "Connections" in obj.PropertiesList:
+            obj.Connections = []
+            obj.removeProperty("Connections")
         if "InstanceLinkName" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyString",
@@ -404,13 +450,6 @@ class SMConnectedPartPattern:
                 translate("App::Property", "Generated App::Link array"),
             )
             obj.setEditorMode("InstanceLinkName", 1)
-        if "PatternCutNames" not in obj.PropertiesList:
-            obj.addProperty(
-                "App::PropertyStringList",
-                "PatternCutNames",
-                "Connected Pattern",
-                translate("App::Property", "Generated fixed-part cut features"),
-            )
         if "ParentPatternReference" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyXLinkSub",
@@ -563,11 +602,14 @@ class SMConnectedPartPattern:
                     element.LinkPlacement = transform
                     element.Label = "{} {:03d}".format(fp.SourcePartLabel, occurrence)
             fp.AdditionalOccurrences = additional_count
-            bolt_count = sum(
-                connection.BoltCount
-                for connection in fp.Connections
-                if connection is not None
-            )
+            _activate_pattern_connections(fp)
+            bolt_count = 0
+            for connection in pattern_connections(fp):
+                hole_only = set(connection.HoleOnlyLocatorKeys)
+                bolt_count += sum(
+                    record["key"] not in hole_only
+                    for record in definition_locator_records(connection)
+                )
             fp.ConnectionInstanceCount = (
                 len(pattern_transforms(fp, include_seed=True)) * bolt_count
             )
@@ -581,16 +623,31 @@ class SMConnectedPartPattern:
             )
 
     def onDocumentRestored(self, fp):
+        migrating = (
+            "ConnectionNames" not in fp.PropertiesList
+            or "Connections" in fp.PropertiesList
+        )
         self.addVerifyProperties(fp)
+        if migrating:
+            fp.touch()
         if (
             SheetMetalTools.isGuiLoaded()
             and getattr(fp.ViewObject, "Proxy", None) is None
         ):
             SMConnectedPartPatternViewProvider(fp.ViewObject)
 
+    def occurrenceTransforms(self, fp, include_seed=True):
+        """Publish this feature's complete occurrence set to connections."""
+        return pattern_transforms(fp, include_seed=include_seed)
 
-class SMConnectedPatternCut:
-    """Repeated connection holes in one non-repeated participant."""
+
+class SMConnectedPatternCut(SMBoltConnectionCut):
+    """Compatibility adapter for retired pre-occurrence pattern cuts.
+
+    Saved documents may still contain these features in participant history.
+    They now contribute no cutters; the ordinary bolted-connection cut earlier
+    in the same history consumes the connected pattern occurrence provider.
+    """
 
     def __init__(
         self,
@@ -743,81 +800,17 @@ class SMConnectedPatternCut:
                 translate("App::Property", "Pattern-cut evaluation error"),
             )
             obj.setEditorMode("LastError", 1)
+        SMBoltConnectionCut.addVerifyProperties(self, obj)
+        source_cuts = _source_cuts_for_pattern_cut(obj)
+        if source_cuts:
+            connection = connection_for_cut(source_cuts[0])
+            if connection is not None:
+                obj.ConnectionName = connection.Name
+        obj.CutMode = "No Cut"
+        obj.ValidationState = "Retired; connection occurrence provider is active"
 
     def collect_cutter_batches(self, fp, base_shape):
-        pattern = _pattern_for_cut(fp)
-        if pattern is None:
-            raise ValueError("The connected part pattern reference is missing.")
-        transforms = pattern_transforms(pattern)
-        skipped = 0
-        cutter_batches = {}
-        source_cuts = _source_cuts_for_pattern_cut(fp)
-        if not source_cuts:
-            raise ValueError("The seed bolted-connection cuts are missing.")
-        for source_cut in source_cuts:
-            connection = (
-                connection_for_cut(source_cut) if source_cut is not None else None
-            )
-            if source_cut is None or connection is None:
-                raise ValueError("A seed bolted-connection cut is missing.")
-            width = _effective_width(source_cut)
-            slot_length = source_cut.SlotLength.Value
-            rotation = math.radians(source_cut.Rotation.Value)
-            moving_records = _moving_locator_records(pattern, connection)
-            for transform in transforms:
-                for record in moving_records:
-                    seed_frame = record["frame"]
-                    world_frame = _transformed_frame(seed_frame, transform)
-                    local = _local_frame(fp, world_frame)
-                    x_axis = local["x_axis"]
-                    if (
-                        str(source_cut.HoleType) != "Round"
-                        and abs(rotation) > 1e-14
-                    ):
-                        y_axis = _unit(
-                            local["z_axis"].cross(x_axis),
-                            "Cannot determine patterned-hole rotation axis.",
-                        )
-                        x_axis = _scaled(x_axis, math.cos(rotation)).add(
-                            _scaled(y_axis, math.sin(rotation))
-                        )
-                    profile_length = max(
-                        width,
-                        slot_length
-                        if slot_length > SheetMetalTools.smEpsilon
-                        else width,
-                    )
-                    if not axis_intersects_shape_bounds(
-                        base_shape,
-                        local["point"],
-                        local["z_axis"],
-                        profile_length * 0.5,
-                    ):
-                        skipped += 1
-                        continue
-                    depth = _feature_depth(base_shape, local["point"])
-                    cutter = make_hole_cutter(
-                        source_cut.HoleType,
-                        local["point"],
-                        x_axis,
-                        local["z_axis"],
-                        width,
-                        slot_length,
-                        depth,
-                    )
-                    cut_extent = str(source_cut.CutExtent)
-                    cutter_batches.setdefault(cut_extent, []).append(
-                        (cutter, local["point"])
-                    )
-        return [
-            {
-                "cut_extent": cut_extent,
-                "records": records,
-                "skip_non_intersections": True,
-                "validate_through": False,
-            }
-            for cut_extent, records in cutter_batches.items()
-        ], skipped
+        return SMBoltConnectionCut.collect_cutter_batches(self, fp, base_shape)
 
     def execute(self, fp):
         self.addVerifyProperties(fp)
@@ -882,7 +875,7 @@ def create_connected_part_pattern(
     if not unique_connections:
         raise ValueError("Select at least one bolted connection to pattern.")
 
-    target_source_cuts = {}
+    has_fixed_participant = False
     for connection in unique_connections:
         if getattr(connection, "SheetMetalType", "") != "BoltConnection":
             raise ValueError("Every selected connection must be a Bolted Connection.")
@@ -900,14 +893,14 @@ def create_connected_part_pattern(
             participant = doc.getObject(cut.ParticipantName)
             if participant is None:
                 raise ValueError("A connected participant is missing.")
-            target_source_cuts.setdefault(participant, []).append(cut)
+            has_fixed_participant = True
         if not source_part_cut_found:
             raise ValueError(
                 "{} has no seed cut in {}.".format(
                     source_part.Label, connection.Label
                 )
             )
-    if not target_source_cuts:
+    if not has_fixed_participant:
         raise ValueError("The selected connections have no fixed participants to cut.")
 
     instance_link = doc.addObject("App::Link", "ConnectedPartInstances")
@@ -942,71 +935,149 @@ def create_connected_part_pattern(
             )
         pattern.LinearDirectionReference = (direction_reference, [""])
     _pattern_group(doc).addObject(pattern)
-
-    pattern_cuts = []
-    for participant, source_cuts in target_source_cuts.items():
-        previous = _target_tip(participant)
-        if (
-            previous is None
-            or not hasattr(previous, "Shape")
-            or previous.Shape.isNull()
-        ):
-            raise ValueError(
-                "{} has no finished shape to cut.".format(participant.Label)
-            )
-        container = previous.getParentGeoFeatureGroup()
-        if container is None or container.TypeId not in (
-            "App::Part",
-            "PartDesign::Body",
-        ):
-            raise ValueError(
-                "{} has no supported feature-history container.".format(
-                    participant.Label
-                )
-            )
-        feature_type = (
-            "PartDesign::FeaturePython"
-            if container.TypeId == "PartDesign::Body"
-            else "Part::FeaturePython"
-        )
-        cut = doc.addObject(feature_type, "ConnectedPatternCut")
-        cut.Label = translate("SheetMetal", "Pattern Connection Cut") + " - " + (
-            participant.Label
-        )
-        container.addObject(cut)
-        SMConnectedPatternCut(
-            cut,
-            pattern,
-            previous,
-            source_cuts,
-            participant,
-        )
-        if getattr(previous, "SheetMetalType", "") in (
-            "BoltConnectionCut",
-            "ConnectedPatternCut",
-        ):
-            previous.touch()
-        if container.TypeId == "PartDesign::Body":
-            container.Tip = cut
-        participant.Tip = cut.Name
-        if getattr(previous, "ViewObject", None) is not None:
-            previous.ViewObject.Visibility = False
-        if getattr(cut, "ViewObject", None) is not None:
-            cut.ViewObject.Visibility = True
-        pattern_cuts.append(cut)
-
-    pattern.PatternCutNames = [cut.Name for cut in pattern_cuts]
+    _activate_pattern_connections(pattern)
     doc.recompute()
-    return pattern, instance_link, pattern_cuts
+    return pattern, instance_link, []
 
 
 def pattern_cuts(pattern):
     cuts = []
-    for name in pattern.PatternCutNames:
+    for name in list(getattr(pattern, "PatternCutNames", [])):
         cut = pattern.Document.getObject(name)
         if cut is not None and _pattern_for_cut(cut) is pattern:
             cuts.append(cut)
     return cuts
+
+
+def migrate_connected_part_patterns(doc, remove_legacy_cuts=True):
+    """Upgrade saved connected patterns to unified occurrence-driven cuts.
+
+    When requested, obsolete ConnectedPatternCut history nodes are bypassed and
+    removed after all downstream feature and unfold links have been rewired.
+    """
+    patterns = [
+        obj
+        for obj in doc.Objects
+        if getattr(obj, "SheetMetalType", "") == "ConnectedPartPattern"
+    ]
+    for pattern in patterns:
+        SMConnectedPartPattern.addVerifyProperties(pattern.Proxy, pattern)
+        pattern.touch()
+    doc.recompute()
+    if not remove_legacy_cuts:
+        return 0
+
+    legacy = [
+        obj
+        for obj in doc.Objects
+        if getattr(obj, "SheetMetalType", "") == "ConnectedPatternCut"
+    ]
+    if not legacy:
+        for pattern in patterns:
+            if "PatternCutNames" in pattern.PropertiesList:
+                pattern.removeProperty("PatternCutNames")
+        return 0
+    legacy_set = set(legacy)
+
+    def replacement(feature):
+        previous = getattr(feature, "PreviousFeature", None)
+        visited = set()
+        while previous in legacy_set:
+            if previous in visited:
+                raise ValueError("Legacy pattern-cut history contains a cycle.")
+            visited.add(previous)
+            previous = getattr(previous, "PreviousFeature", None)
+        if previous is None:
+            raise ValueError(
+                "{} has no non-pattern predecessor.".format(feature.Label)
+            )
+        return previous
+
+    for old in reversed(legacy):
+        prior = replacement(old)
+        for dependent in list(old.InList):
+            if dependent in legacy_set or dependent.TypeId == "PartDesign::Body":
+                continue
+            for property_name in dependent.PropertiesList:
+                if property_name == "Group":
+                    continue
+                property_type = dependent.getTypeIdOfProperty(property_name)
+                try:
+                    value = getattr(dependent, property_name)
+                    if value is old and property_type in (
+                        "App::PropertyLink",
+                        "App::PropertyXLink",
+                    ):
+                        setattr(dependent, property_name, prior)
+                    elif (
+                        isinstance(value, tuple)
+                        and value
+                        and value[0] is old
+                        and property_type
+                        in ("App::PropertyLinkSub", "App::PropertyXLinkSub")
+                    ):
+                        setattr(dependent, property_name, (prior, value[1]))
+                except (AttributeError, TypeError, RuntimeError) as error:
+                    raise ValueError(
+                        "Cannot rewire {}.{}: {}".format(
+                            dependent.Label, property_name, error
+                        )
+                    )
+        container = old.getParentGeoFeatureGroup()
+        if container is not None and getattr(container, "Tip", None) is old:
+            container.Tip = prior
+        for part in doc.Objects:
+            if str(getattr(part, "Tip", "")) == old.Name:
+                part.Tip = prior.Name
+
+    for pattern in patterns:
+        if "PatternCutNames" in pattern.PropertiesList:
+            pattern.PatternCutNames = []
+
+    for old in reversed(legacy):
+        prior = replacement(old)
+        for dependent in list(old.InList):
+            if dependent not in legacy_set:
+                continue
+            if getattr(dependent, "PreviousFeature", None) is old:
+                dependent.PreviousFeature = prior
+            if getattr(dependent, "BaseFeature", None) is old:
+                dependent.BaseFeature = prior
+        doc.removeObject(old.Name)
+
+    for pattern in patterns:
+        if "PatternCutNames" in pattern.PropertiesList:
+            pattern.removeProperty("PatternCutNames")
+    for connection in [
+        obj
+        for obj in doc.Objects
+        if getattr(obj, "SheetMetalType", "") == "BoltConnection"
+    ]:
+        for cut in connection_cuts(connection):
+            cut.touch()
+    doc.recompute()
+
+    if SheetMetalTools.isGuiLoaded():
+        for obj in doc.Objects:
+            if not (
+                obj.TypeId == "App::Part"
+                and getattr(obj, "SheetMetalType", "") == "Part"
+            ):
+                continue
+            tip = _target_tip(obj)
+            if getattr(obj, "ViewObject", None) is not None:
+                obj.ViewObject.Visibility = True
+            container = (
+                tip.getParentGeoFeatureGroup() if tip is not None else None
+            )
+            if (
+                container is not None
+                and getattr(container, "ViewObject", None) is not None
+            ):
+                container.ViewObject.Visibility = True
+            if tip is not None and getattr(tip, "ViewObject", None) is not None:
+                tip.ViewObject.Visibility = True
+    return len(legacy)
 
 
 def _patterns_using_connection(connection):
@@ -1015,84 +1086,29 @@ def _patterns_using_connection(connection):
         obj
         for obj in connection.Document.Objects
         if getattr(obj, "SheetMetalType", "") == "ConnectedPartPattern"
-        and connection in list(getattr(obj, "Connections", []))
+        and connection.Name in _pattern_connection_names(obj)
     ]
     document_order = {
         obj.Name: index for index, obj in enumerate(connection.Document.Objects)
     }
 
-    def depth(pattern, visited=None):
-        visited = set() if visited is None else set(visited)
-        if pattern.Name in visited:
-            return 0
-        visited.add(pattern.Name)
-        parent = _parent_pattern(pattern)
-        return 0 if parent is None else 1 + depth(parent, visited)
-
     return sorted(
         candidates,
-        key=lambda pattern: (depth(pattern), document_order[pattern.Name]),
+        key=lambda pattern: (_pattern_depth(pattern), document_order[pattern.Name]),
     )
 
 
 def sync_connection_participant_patterns(connection, participant_cuts):
-    """Extend existing connection patterns to newly added fixed participants."""
-    doc = connection.Document
-    patterns = _patterns_using_connection(connection)
-    created = []
-    for source_cut in participant_cuts:
-        participant = doc.getObject(source_cut.ParticipantName)
-        if participant is None:
-            raise ValueError("A newly added connection participant is missing.")
-        previous = source_cut
-        for pattern in patterns:
-            if pattern.SourcePartName == participant.Name:
-                continue
-            container = previous.getParentGeoFeatureGroup()
-            if container is None or container.TypeId not in (
-                "App::Part",
-                "PartDesign::Body",
-            ):
-                raise ValueError(
-                    "{} has no supported feature-history container.".format(
-                        participant.Label
-                    )
-                )
-            feature_type = (
-                "PartDesign::FeaturePython"
-                if container.TypeId == "PartDesign::Body"
-                else "Part::FeaturePython"
-            )
-            cut = doc.addObject(feature_type, "ConnectedPatternCut")
-            cut.Label = translate("SheetMetal", "Pattern Connection Cut") + " - " + (
-                participant.Label
-            )
-            container.addObject(cut)
-            SMConnectedPatternCut(
-                cut,
-                pattern,
-                previous,
-                [source_cut],
-                participant,
-            )
-            if getattr(previous, "SheetMetalType", "") in (
-                "BoltConnectionCut",
-                "ConnectedPatternCut",
-            ):
-                previous.touch()
-            if container.TypeId == "PartDesign::Body":
-                container.Tip = cut
-            participant.Tip = cut.Name
-            if getattr(previous, "ViewObject", None) is not None:
-                previous.ViewObject.Visibility = False
-            if getattr(cut, "ViewObject", None) is not None:
-                cut.ViewObject.Visibility = True
-            pattern.PatternCutNames = list(pattern.PatternCutNames) + [cut.Name]
-            pattern.touch()
-            previous = cut
-            created.append(cut)
-    doc.recompute()
-    return created
+    """Upgrade new participant cuts to the connection's active occurrence set."""
+    patterns = _leaf_patterns_for_connection(connection)
+    if patterns:
+        set_connection_occurrence_providers(
+            connection, patterns, _pattern_source_part(patterns[0])
+        )
+    for cut in participant_cuts:
+        cut.touch()
+    connection.Document.recompute()
+    return []
 
 
 def _sync_pattern_cut_visibility(cut):
@@ -1144,7 +1160,7 @@ if SheetMetalTools.isGuiLoaded():
             summary = QtGui.QLabel(
                 translate("SheetMetal", "Repeat %1 with %2 bolted connection(s)")
                 .replace("%1", obj.SourcePartLabel)
-                .replace("%2", str(len(obj.Connections)))
+                .replace("%2", str(len(pattern_connections(obj))))
             )
             layout.addWidget(summary)
 
@@ -1557,7 +1573,7 @@ if SheetMetalTools.isGuiLoaded():
                 parent_pattern = patterns[0] if patterns else None
                 if parent_pattern is not None:
                     source_part = _pattern_source_part(parent_pattern)
-                    selected_connections = list(parent_pattern.Connections)
+                    selected_connections = pattern_connections(parent_pattern)
                     pattern_type = "Linear"
                 else:
                     source_part = parts[0]

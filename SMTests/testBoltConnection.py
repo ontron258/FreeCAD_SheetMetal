@@ -132,10 +132,12 @@ class TestBoltConnection(unittest.TestCase):
             self.assertEqual(connection.SheetMetalType, "BoltConnection")
             self.assertEqual(cut.SheetMetalType, "BoltConnectionCut")
             self.assertTrue(cut.UseConnectionFit)
+            self.assertEqual(str(cut.CutMode), "Cut")
             self.assertEqual(str(cut.HoleType), "Round")
             self.assertAlmostEqual(cut.SlotLength.Value, 0.0)
             self.assertEqual(connection.LocatorCount, 0)
             self.assertEqual(connection.AuxiliaryHoleCount, 0)
+            self.assertEqual(str(connection.OccurrenceMode), "Existing Holes")
         finally:
             App.closeDocument(doc.Name)
 
@@ -417,6 +419,173 @@ class TestBoltConnection(unittest.TestCase):
             self.assertTrue(
                 frames[0]["point"].isEqual(App.Vector(111.0, 22.0, 30.0), 1.0e-9)
             )
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_app_link_occurrence_transforms_locators_and_updates_target_cut(self):
+        doc = App.newDocument("BoltConnectionLinkOccurrence")
+        try:
+            source, source_base = _sheet_part(doc, "ReusableFoot", 0.0)
+            sketch = doc.addObject("Sketcher::SketchObject", "FootInterface")
+            sketch.addGeometry(Part.Point(App.Vector(10.0, 10.0, 0.0)), False)
+            source.addObject(sketch)
+
+            occurrence = doc.addObject("App::Link", "PlacedFoot")
+            occurrence.Label = "Placed Foot"
+            occurrence.LinkedObject = source
+            occurrence.LinkTransform = True
+            occurrence.Placement.Base = App.Vector(40.0, 0.0, 0.0)
+
+            target, target_base = _sheet_part(doc, "NewPanel", 0.0)
+            target_base.Shape = Part.makeBox(80.0, 30.0, 2.0)
+
+            connection, cuts = create_bolted_connection(
+                doc,
+                [(sketch, [])],
+                [target],
+                locator_occurrence=occurrence,
+            )
+            doc.recompute()
+
+            self.assertIs(connection.LocatorOccurrence, occurrence)
+            self.assertEqual(connection.OccurrenceParticipantName, occurrence.Name)
+            self.assertEqual(connection.OccurrenceSourceName, source.Name)
+            self.assertEqual(str(connection.OccurrenceMode), "Existing Holes")
+            self.assertEqual(str(connection.OccurrenceRole), "Head Side")
+            self.assertEqual(connection.ParticipantNames, [target.Name])
+            self.assertEqual(str(cuts[0].Role), "Nut Side")
+            self.assertAlmostEqual(source_base.Shape.Volume, 1800.0)
+            self.assertTrue(
+                locator_frames(connection)[0]["point"].isEqual(
+                    App.Vector(50.0, 10.0, 0.0), 1.0e-9
+                )
+            )
+            at_first_location = Part.makeCylinder(
+                1.0, 2.0, App.Vector(50.0, 10.0, 0.0)
+            )
+            at_definition_location = Part.makeCylinder(
+                1.0, 2.0, App.Vector(10.0, 10.0, 0.0)
+            )
+            self.assertAlmostEqual(
+                cuts[0].Shape.common(at_first_location).Volume, 0.0, places=7
+            )
+            self.assertGreater(
+                cuts[0].Shape.common(at_definition_location).Volume, 0.0
+            )
+
+            occurrence.Placement.Base = App.Vector(20.0, 0.0, 0.0)
+            doc.recompute()
+            at_second_location = Part.makeCylinder(
+                1.0, 2.0, App.Vector(30.0, 10.0, 0.0)
+            )
+            self.assertTrue(
+                locator_frames(connection)[0]["point"].isEqual(
+                    App.Vector(30.0, 10.0, 0.0), 1.0e-9
+                )
+            )
+            self.assertAlmostEqual(
+                cuts[0].Shape.common(at_second_location).Volume, 0.0, places=7
+            )
+            self.assertGreater(cuts[0].Shape.common(at_first_location).Volume, 0.0)
+            self.assertEqual(cuts[0].LastError, "")
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_link_occurrence_connection_survives_save_and_reopen(self):
+        doc = App.newDocument("BoltConnectionLinkPersistence")
+        path = os.path.join(
+            tempfile.gettempdir(), "BoltConnectionLinkPersistence.FCStd"
+        )
+        try:
+            source, _source_base = _sheet_part(doc, "SavedReusableFoot", 0.0)
+            source.Placement.Base.x = 10.0
+            sketch = doc.addObject("Sketcher::SketchObject", "SavedFootInterface")
+            sketch.addGeometry(Part.Point(App.Vector(10.0, 10.0, 0.0)), False)
+            source.addObject(sketch)
+
+            assembly = doc.addObject("App::Part", "OccurrenceAssembly")
+            assembly.Placement.Base = App.Vector(5.0, 0.0, 0.0)
+            occurrence = doc.addObject("App::Link", "SavedPlacedFoot")
+            occurrence.LinkedObject = source
+            occurrence.LinkTransform = False
+            occurrence.Placement.Base = App.Vector(20.0, 0.0, 0.0)
+            assembly.addObject(occurrence)
+
+            target, target_base = _sheet_part(doc, "SavedNewPanel", 0.0)
+            target_base.Shape = Part.makeBox(80.0, 30.0, 2.0)
+            connection, cuts = create_bolted_connection(
+                doc,
+                [(sketch, [])],
+                [target],
+                "Carriage Bolt",
+                occurrence,
+            )
+            doc.recompute()
+            self.assertTrue(
+                locator_frames(connection)[0]["point"].isEqual(
+                    App.Vector(35.0, 10.0, 0.0), 1.0e-9
+                )
+            )
+            connection_name = connection.Name
+            source_name = source.Name
+            occurrence_name = occurrence.Name
+            cut_name = cuts[0].Name
+            doc.saveAs(path)
+            App.closeDocument(doc.Name)
+
+            reopened = App.openDocument(path)
+            reopened.recompute()
+            restored = reopened.getObject(connection_name)
+            restored_occurrence = reopened.getObject(occurrence_name)
+            restored_cut = reopened.getObject(cut_name)
+            self.assertIs(restored.LocatorOccurrence, restored_occurrence)
+            self.assertEqual(restored.OccurrenceSourceName, source_name)
+            self.assertEqual(str(restored.ConnectionType), "Carriage Bolt")
+            self.assertEqual(str(restored_cut.HoleType), "Square")
+            self.assertTrue(
+                locator_frames(restored)[0]["point"].isEqual(
+                    App.Vector(35.0, 10.0, 0.0), 1.0e-9
+                )
+            )
+            self.assertEqual(restored_cut.LastError, "")
+            self.assertTrue(restored_cut.Shape.isValid())
+        finally:
+            if App.ActiveDocument is not None:
+                App.closeDocument(App.ActiveDocument.Name)
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_participant_cut_modes_support_passthrough_and_existing_holes(self):
+        doc = App.newDocument("BoltConnectionCutModes")
+        try:
+            target, base = _sheet_part(doc, "ModeTarget", 0.0)
+            sketch = doc.addObject("Sketcher::SketchObject", "ModeLocator")
+            sketch.addGeometry(Part.Point(App.Vector(10.0, 10.0, 0.0)), False)
+            connection, cuts = create_bolted_connection(
+                doc, [(sketch, [])], [target]
+            )
+            cut = cuts[0]
+
+            cut.CutMode = "No Cut"
+            doc.recompute()
+            self.assertAlmostEqual(cut.Shape.Volume, base.Shape.Volume, places=7)
+            self.assertEqual(cut.ValidationState, "Metadata only; no cut requested")
+            self.assertEqual(cut.LastError, "")
+
+            cut.CutMode = "Existing Holes"
+            doc.recompute()
+            self.assertIn("Expected existing hole", cut.LastError)
+
+            diameter = round_clearance_diameter("5/16 in", "Normal")
+            existing = Part.makeCylinder(
+                diameter * 0.5, 2.0, App.Vector(10.0, 10.0, 0.0)
+            )
+            base.Shape = base.Shape.cut(existing)
+            doc.recompute()
+            self.assertEqual(cut.LastError, "")
+            self.assertEqual(cut.ValidationState, "Existing holes confirmed")
+            self.assertAlmostEqual(cut.Shape.Volume, base.Shape.Volume, places=7)
+            self.assertEqual(connection.BoltCount, 1)
         finally:
             App.closeDocument(doc.Name)
 

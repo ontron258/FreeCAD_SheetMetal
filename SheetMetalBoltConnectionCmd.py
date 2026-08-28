@@ -19,7 +19,10 @@
 The connection object stores design intent and live sketch locator links.  It
 does not own a Shape.  Each connected SheetMetalPart receives a downstream
 cut feature in its own history, so every participant remains independently
-valid and unfoldable.
+valid and unfoldable.  An optional App::Link occurrence can carry the locator
+definition into an arbitrary assembly placement; its source geometry remains
+one manufactured item while the connection cuts only the newly selected
+targets.
 """
 
 import math
@@ -40,6 +43,8 @@ BOLT_SIZES = ["3/16 in", "1/4 in", "5/16 in", "3/8 in", "1/2 in", "3/4 in"]
 FITS = ["Close", "Normal", "Oversize"]
 HOLE_TYPES = ["Round", "Square", "Slotted Round", "Slotted Square"]
 PARTICIPANT_ROLES = ["Head Side", "Intermediate", "Nut Side"]
+PARTICIPANT_CUT_MODES = ["Cut", "Existing Holes", "No Cut"]
+OCCURRENCE_MODES = ["Existing Holes", "No Cut"]
 CUT_EXTENTS = ["Nearest Sheet Layer", "Through Entire Part"]
 
 INCH = 25.4
@@ -109,6 +114,69 @@ def _frame(point, x_axis, z_axis):
         "x_axis": x_axis,
         "z_axis": z_axis,
     }
+
+
+def _transformed_frame(world_frame, transform):
+    """Apply one occurrence delta placement to a world-space locator frame."""
+    return _frame(
+        transform.multVec(world_frame["point"]),
+        transform.Rotation.multVec(world_frame["x_axis"]),
+        transform.Rotation.multVec(world_frame["z_axis"]),
+    )
+
+
+def _locator_occurrence(connection):
+    """Return the optional single App::Link carrying the locator definition."""
+    occurrence = getattr(connection, "LocatorOccurrence", None)
+    if isinstance(occurrence, tuple):
+        occurrence = occurrence[0]
+    return occurrence
+
+
+def _linked_sheet_metal_part(occurrence):
+    """Resolve the Sheet Metal Part definition referenced by one App::Link."""
+    if occurrence is None or getattr(occurrence, "TypeId", "") != "App::Link":
+        return None
+    linked = getattr(occurrence, "LinkedObject", None)
+    if (
+        linked is not None
+        and linked.TypeId == "App::Part"
+        and getattr(linked, "SheetMetalType", "") == "Part"
+    ):
+        return linked
+    return _find_sheet_metal_part(linked) if linked is not None else None
+
+
+def _occurrence_delta_placement(occurrence):
+    """Return the world-space delta applied by a single App::Link occurrence.
+
+    Locator sketches already resolve to the source's world space.  With
+    ``LinkTransform`` enabled, the Link placement is therefore the delta.  A
+    standard Link with it disabled suppresses the source Part placement, so
+    that placement is removed from the delta explicitly.
+    """
+    if occurrence is None:
+        return FreeCAD.Placement()
+    if getattr(occurrence, "TypeId", "") != "App::Link":
+        raise ValueError("The locator occurrence must be an App::Link.")
+    if int(getattr(occurrence, "ElementCount", 0)) > 0:
+        raise ValueError(
+            "Select a single App::Link occurrence, not a Link array."
+        )
+    placement = FreeCAD.Placement(occurrence.Placement)
+    parent = (
+        occurrence.getParentGeoFeatureGroup()
+        if hasattr(occurrence, "getParentGeoFeatureGroup")
+        else None
+    )
+    if parent is not None and hasattr(parent, "getGlobalPlacement"):
+        placement = parent.getGlobalPlacement().multiply(placement)
+    if not bool(getattr(occurrence, "LinkTransform", False)):
+        source_part = _linked_sheet_metal_part(occurrence)
+        if source_part is None:
+            raise ValueError("The locator occurrence has no Sheet Metal Part source.")
+        placement = placement.multiply(source_part.getGlobalPlacement().inverse())
+    return placement
 
 
 def round_clearance_diameter(size, fit):
@@ -241,6 +309,13 @@ def locator_candidates(connection):
             )
         else:
             records.extend(_geometry_candidates(sketch))
+    occurrence = _locator_occurrence(connection)
+    if occurrence is not None:
+        transform = _occurrence_delta_placement(occurrence)
+        records = [
+            dict(record, frame=_transformed_frame(record["frame"], transform))
+            for record in records
+        ]
     return records
 
 
@@ -732,12 +807,20 @@ def infer_participant_assignments(parts, tips, records):
 class SMBoltConnection:
     """Metadata and locator definition shared by all participant cuts."""
 
-    def __init__(self, obj, locator_references=None, participant_names=None):
+    def __init__(
+        self,
+        obj,
+        locator_references=None,
+        participant_names=None,
+        locator_occurrence=None,
+    ):
         self.addVerifyProperties(obj)
         if locator_references is not None:
             obj.LocatorReferences = locator_references
         if participant_names is not None:
             obj.ParticipantNames = participant_names
+        if locator_occurrence is not None:
+            obj.LocatorOccurrence = locator_occurrence
         obj.Proxy = self
 
     def addVerifyProperties(self, obj):
@@ -763,6 +846,69 @@ class SMBoltConnection:
                     "Included whole-sketch geometry keys; empty includes every locator",
                 ),
             )
+        if "LocatorOccurrence" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyXLink",
+                "LocatorOccurrence",
+                "Bolted Connection",
+                translate(
+                    "App::Property",
+                    "Optional placed App::Link carrying the locator sketch",
+                ),
+            )
+        if "OccurrenceParticipantName" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "OccurrenceParticipantName",
+                "Occurrence Participant",
+                translate("App::Property", "Internal name of the placed occurrence"),
+            )
+            obj.setEditorMode("OccurrenceParticipantName", 1)
+        if "OccurrenceParticipantLabel" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "OccurrenceParticipantLabel",
+                "Occurrence Participant",
+                translate("App::Property", "Label of the placed occurrence"),
+            )
+            obj.setEditorMode("OccurrenceParticipantLabel", 1)
+        if "OccurrenceSourceName" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "OccurrenceSourceName",
+                "Occurrence Participant",
+                translate(
+                    "App::Property", "Sheet Metal Part definition used by the occurrence"
+                ),
+            )
+            obj.setEditorMode("OccurrenceSourceName", 1)
+        _set_enumeration(
+            obj,
+            "OccurrenceMode",
+            OCCURRENCE_MODES,
+            "Existing Holes",
+            "Occurrence Participant",
+            translate(
+                "App::Property",
+                "Whether the placed occurrence is assumed pre-drilled or metadata-only",
+            ),
+        )
+        _set_enumeration(
+            obj,
+            "OccurrenceRole",
+            PARTICIPANT_ROLES,
+            "Head Side",
+            "Occurrence Participant",
+            translate("App::Property", "Placed occurrence's role in the bolt stack"),
+        )
+        if "OccurrenceState" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "OccurrenceState",
+                "Occurrence Participant",
+                translate("App::Property", "Current occurrence-resolution state"),
+            )
+            obj.setEditorMode("OccurrenceState", 1)
         if "HoleOnlyLocatorKeys" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyStringList", "HoleOnlyLocatorKeys", "Bolted Connection",
@@ -844,6 +990,25 @@ class SMBoltConnection:
     def execute(self, fp):
         self.addVerifyProperties(fp)
         try:
+            occurrence = _locator_occurrence(fp)
+            if occurrence is None:
+                fp.OccurrenceParticipantName = ""
+                fp.OccurrenceParticipantLabel = ""
+                fp.OccurrenceSourceName = ""
+                fp.OccurrenceState = "Definition coordinates"
+            else:
+                source_part = _linked_sheet_metal_part(occurrence)
+                if source_part is None:
+                    raise ValueError(
+                        "The locator occurrence must link a Sheet Metal Part."
+                    )
+                _occurrence_delta_placement(occurrence)
+                fp.OccurrenceParticipantName = occurrence.Name
+                fp.OccurrenceParticipantLabel = occurrence.Label
+                fp.OccurrenceSourceName = source_part.Name
+                fp.OccurrenceState = "Resolved from {} ({})".format(
+                    occurrence.Label, fp.OccurrenceMode
+                )
             records = locator_records(fp)
             hole_only = set(fp.HoleOnlyLocatorKeys)
             fp.LocatorCount = len(records)
@@ -853,6 +1018,8 @@ class SMBoltConnection:
             fp.BoltCount = fp.LocatorCount - fp.AuxiliaryHoleCount
             if fp.CutFeatureNames:
                 sync_common_participants(fp)
+                for cut in connection_cuts(fp):
+                    cut.touch()
             fp.LastError = ""
         except (ValueError, Part.OCCError) as error:
             fp.BoltCount = 0
@@ -938,6 +1105,17 @@ class SMBoltConnectionCut:
                 ),
             )
         _set_enumeration(
+            obj,
+            "CutMode",
+            PARTICIPANT_CUT_MODES,
+            "Cut",
+            "Participant",
+            translate(
+                "App::Property",
+                "Cut holes, validate existing holes, or retain metadata without cutting",
+            ),
+        )
+        _set_enumeration(
             obj, "Role", PARTICIPANT_ROLES, "Intermediate", "Participant",
             translate("App::Property", "Part's role along the bolt stack"),
         )
@@ -1012,11 +1190,23 @@ class SMBoltConnectionCut:
                 translate("App::Property", "Cut evaluation error"),
             )
             obj.setEditorMode("LastError", 1)
+        if "ValidationState" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "ValidationState",
+                "Result",
+                translate("App::Property", "Participant cut or validation state"),
+            )
+            obj.setEditorMode("ValidationState", 1)
 
     def collect_cutter_batches(self, fp, base_shape):
         connection = connection_for_cut(fp)
         if connection is None:
             raise ValueError("The bolted connection reference is missing.")
+        cut_mode = str(fp.CutMode)
+        if cut_mode == "No Cut":
+            fp.ValidationState = "Metadata only; no cut requested"
+            return [], 0
         width = _effective_width(fp)
         slot_length = fp.SlotLength.Value
         rotation = math.radians(fp.Rotation.Value)
@@ -1044,6 +1234,21 @@ class SMBoltConnectionCut:
                 depth,
             )
             cutter_records.append((cutter, local["point"]))
+        if cut_mode == "Existing Holes":
+            obstructed = [
+                index
+                for index, (cutter, _center) in enumerate(cutter_records, start=1)
+                if base_shape.common(cutter).Volume > 1.0e-7
+            ]
+            if obstructed:
+                raise ValueError(
+                    "Expected existing hole(s) are obstructed at location(s): {}.".format(
+                        ", ".join(str(index) for index in obstructed)
+                    )
+                )
+            fp.ValidationState = "Existing holes confirmed"
+            return [], 0
+        fp.ValidationState = "Cut"
         return [
             {
                 "cut_extent": str(fp.CutExtent),
@@ -1078,8 +1283,33 @@ def _default_profile(connection_type, index):
     return "Round"
 
 
+def _validate_locator_occurrence(doc, locator_references, occurrence):
+    """Validate one placed source occurrence and its definition-space sketches."""
+    if occurrence is None:
+        return None
+    if occurrence.Document is not doc:
+        raise ValueError("The locator occurrence must be in the active document.")
+    _occurrence_delta_placement(occurrence)
+    source_part = _linked_sheet_metal_part(occurrence)
+    if source_part is None:
+        raise ValueError("The locator occurrence must link a Sheet Metal Part.")
+    for sketch, _sub_names in locator_references:
+        owner = _find_sheet_metal_part(sketch)
+        if owner is not source_part:
+            raise ValueError(
+                "Locator sketch {} must belong to the linked source part {}.".format(
+                    sketch.Label, source_part.Label
+                )
+            )
+    return source_part
+
+
 def create_bolted_connection(
-    doc, locator_references, participants, connection_type="Hex Bolt",
+    doc,
+    locator_references,
+    participants,
+    connection_type="Hex Bolt",
+    locator_occurrence=None,
 ):
     """Create one connection and one participant-specific cut per part."""
     unique_parts = []
@@ -1090,6 +1320,9 @@ def create_bolted_connection(
         raise ValueError("Select at least one sheet-metal part to cut.")
     if not locator_references:
         raise ValueError("Select at least one sketch locator.")
+    occurrence_source = _validate_locator_occurrence(
+        doc, locator_references, locator_occurrence
+    )
 
     tips = []
     for part in unique_parts:
@@ -1110,7 +1343,13 @@ def create_bolted_connection(
         connection,
         locator_references,
         [part.Name for part in unique_parts],
+        locator_occurrence,
     )
+    if locator_occurrence is not None:
+        connection.OccurrenceParticipantName = locator_occurrence.Name
+        connection.OccurrenceParticipantLabel = locator_occurrence.Label
+        connection.OccurrenceSourceName = occurrence_source.Name
+        connection.OccurrenceRole = "Head Side"
     connection.ConnectionType = connection_type
     _connection_group(doc).addObject(connection)
     records = locator_records(connection)
@@ -1118,7 +1357,11 @@ def create_bolted_connection(
         unique_parts, tips, records
     )
     connection.CommonParticipantNames = common_names
-    head_part_name = common_names[0] if common_names else unique_parts[0].Name
+    head_part_name = (
+        None
+        if locator_occurrence is not None
+        else (common_names[0] if common_names else unique_parts[0].Name)
+    )
 
     cuts = []
     for index, (part, previous) in enumerate(zip(unique_parts, tips)):
@@ -1263,6 +1506,12 @@ def sync_common_participants(connection):
 def set_default_participant_roles(connection):
     """Assign Head/Intermediate/Nut defaults from common-part membership."""
     cuts = connection_cuts(connection)
+    if _locator_occurrence(connection) is not None:
+        connection.OccurrenceRole = "Head Side"
+        for cut in cuts:
+            cut.Role = "Nut Side"
+        connection.RoleDefaultsApplied = True
+        return
     common_names = set(connection.CommonParticipantNames)
     common_cuts = [cut for cut in cuts if cut.ParticipantName in common_names]
     if common_cuts:
@@ -1338,6 +1587,32 @@ if SheetMetalTools.isGuiLoaded():
             form_layout.addRow(translate("SheetMetal", "Connection type"), self.connection_type)
             form_layout.addRow(translate("SheetMetal", "Bolt size"), self.bolt_size)
             form_layout.addRow(translate("SheetMetal", "Common fit"), self.fit)
+            occurrence = _locator_occurrence(obj)
+            self.occurrence_mode = None
+            self.occurrence_role = None
+            if occurrence is not None:
+                occurrence_label = QtGui.QLabel(occurrence.Label)
+                occurrence_label.setToolTip(
+                    translate(
+                        "SheetMetal",
+                        "Locator points are transformed by this placed App::Link.",
+                    )
+                )
+                self.occurrence_mode = QtGui.QComboBox()
+                self.occurrence_mode.addItems(OCCURRENCE_MODES)
+                self.occurrence_mode.setCurrentText(str(obj.OccurrenceMode))
+                self.occurrence_role = QtGui.QComboBox()
+                self.occurrence_role.addItems(PARTICIPANT_ROLES)
+                self.occurrence_role.setCurrentText(str(obj.OccurrenceRole))
+                form_layout.addRow(
+                    translate("SheetMetal", "Placed occurrence"), occurrence_label
+                )
+                form_layout.addRow(
+                    translate("SheetMetal", "Occurrence action"), self.occurrence_mode
+                )
+                form_layout.addRow(
+                    translate("SheetMetal", "Occurrence role"), self.occurrence_role
+                )
             layout.addLayout(form_layout)
 
             self.locator_label = QtGui.QLabel(
@@ -1363,10 +1638,11 @@ if SheetMetalTools.isGuiLoaded():
             layout.addWidget(self.locator_tree)
 
             self.table = QtGui.QTableWidget()
-            self.table.setColumnCount(9)
+            self.table.setColumnCount(10)
             self.table.setHorizontalHeaderLabels(
                 [
                     translate("SheetMetal", "Part"),
+                    translate("SheetMetal", "Action"),
                     translate("SheetMetal", "All locations"),
                     translate("SheetMetal", "Role"),
                     translate("SheetMetal", "Hole"),
@@ -1418,6 +1694,18 @@ if SheetMetalTools.isGuiLoaded():
             self.fit.currentTextChanged.connect(
                 lambda value: self._set_connection_property("Fit", value)
             )
+            if self.occurrence_mode is not None:
+                self.occurrence_mode.currentTextChanged.connect(
+                    lambda value: self._set_connection_property(
+                        "OccurrenceMode", value
+                    )
+                )
+            if self.occurrence_role is not None:
+                self.occurrence_role.currentTextChanged.connect(
+                    lambda value: self._set_connection_property(
+                        "OccurrenceRole", value
+                    )
+                )
             self.add_participants_button.clicked.connect(
                 self._add_selected_participants
             )
@@ -1575,6 +1863,15 @@ if SheetMetalTools.isGuiLoaded():
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                 self.table.setItem(row, 0, item)
 
+                cut_mode = self._combo(
+                    PARTICIPANT_CUT_MODES,
+                    cut.CutMode,
+                    lambda value, feature=cut: self._set_cut_property(
+                        feature, "CutMode", value
+                    ),
+                )
+                self.table.setCellWidget(row, 1, cut_mode)
+
                 common = QtGui.QCheckBox()
                 common.setChecked(cut.UseAllLocators)
                 common.toggled.connect(
@@ -1582,14 +1879,14 @@ if SheetMetalTools.isGuiLoaded():
                         feature, value
                     )
                 )
-                self.table.setCellWidget(row, 1, common)
+                self.table.setCellWidget(row, 2, common)
 
                 role = self._combo(
                     PARTICIPANT_ROLES,
                     cut.Role,
                     lambda value, feature=cut: self._set_cut_property(feature, "Role", value),
                 )
-                self.table.setCellWidget(row, 2, role)
+                self.table.setCellWidget(row, 3, role)
                 profile = self._combo(
                     HOLE_TYPES,
                     cut.HoleType,
@@ -1597,7 +1894,7 @@ if SheetMetalTools.isGuiLoaded():
                         feature, "HoleType", value
                     ),
                 )
-                self.table.setCellWidget(row, 3, profile)
+                self.table.setCellWidget(row, 4, profile)
 
                 common_fit = QtGui.QCheckBox()
                 common_fit.setChecked(cut.UseConnectionFit)
@@ -1606,13 +1903,13 @@ if SheetMetalTools.isGuiLoaded():
                         feature, "UseConnectionFit", value
                     )
                 )
-                self.table.setCellWidget(row, 4, common_fit)
+                self.table.setCellWidget(row, 5, common_fit)
                 fit = self._combo(
                     FITS,
                     cut.Fit,
                     lambda value, feature=cut: self._set_cut_property(feature, "Fit", value),
                 )
-                self.table.setCellWidget(row, 5, fit)
+                self.table.setCellWidget(row, 6, fit)
 
                 override = QtGui.QDoubleSpinBox()
                 override.setDecimals(4)
@@ -1622,7 +1919,7 @@ if SheetMetalTools.isGuiLoaded():
                 override.valueChanged.connect(
                     lambda value, feature=cut: self._set_override_width(feature, value)
                 )
-                self.table.setCellWidget(row, 6, override)
+                self.table.setCellWidget(row, 7, override)
 
                 slot_length = QtGui.QDoubleSpinBox()
                 slot_length.setDecimals(4)
@@ -1635,7 +1932,7 @@ if SheetMetalTools.isGuiLoaded():
                         feature, value
                     )
                 )
-                self.table.setCellWidget(row, 7, slot_length)
+                self.table.setCellWidget(row, 8, slot_length)
 
                 rotation = QtGui.QDoubleSpinBox()
                 rotation.setDecimals(3)
@@ -1646,7 +1943,7 @@ if SheetMetalTools.isGuiLoaded():
                         feature, "Rotation", value
                     )
                 )
-                self.table.setCellWidget(row, 8, rotation)
+                self.table.setCellWidget(row, 9, rotation)
 
             self.table.resizeColumnsToContents()
 
@@ -1836,6 +2133,7 @@ if SheetMetalTools.isGuiLoaded():
     def _selection_data():
         locator_references = []
         parts = []
+        occurrences = []
         for selection in Gui.Selection.getSelectionEx():
             obj = selection.Object
             if obj.isDerivedFrom("Sketcher::SketchObject"):
@@ -1850,10 +2148,14 @@ if SheetMetalTools.isGuiLoaded():
                 if not selection.SubElementNames or sub_names:
                     locator_references.append((obj, sub_names))
                 continue
+            if getattr(obj, "TypeId", "") == "App::Link":
+                if _linked_sheet_metal_part(obj) is not None and obj not in occurrences:
+                    occurrences.append(obj)
+                continue
             part = _find_sheet_metal_part(obj)
             if part is not None and part not in parts:
                 parts.append(part)
-        return locator_references, parts
+        return locator_references, parts, occurrences
 
 
     class AddBoltConnectionCommandClass:
@@ -1864,18 +2166,24 @@ if SheetMetalTools.isGuiLoaded():
                 "ToolTip": translate(
                     "SheetMetal",
                     "Create one connection/hole set from selected sketch points or "
-                    "circles and one or more Sheet Metal Parts. Each location can be "
-                    "assigned independently and may omit hardware.",
+                    "circles and one or more Sheet Metal Parts. Optionally select one "
+                    "placed App::Link of the locator part to cut at that occurrence. "
+                    "Each location can be assigned independently and may omit hardware.",
                 ),
             }
 
         def Activated(self):
             doc = FreeCAD.ActiveDocument
-            locator_references, parts = _selection_data()
+            locator_references, parts, occurrences = _selection_data()
             doc.openTransaction("BoltConnection")
             try:
+                if len(occurrences) > 1:
+                    raise ValueError("Select at most one locator App::Link occurrence.")
                 connection, cuts = create_bolted_connection(
-                    doc, locator_references, parts
+                    doc,
+                    locator_references,
+                    parts,
+                    locator_occurrence=occurrences[0] if occurrences else None,
                 )
                 SMBoltConnectionViewProvider(connection.ViewObject)
                 for cut in cuts:
@@ -1892,8 +2200,12 @@ if SheetMetalTools.isGuiLoaded():
         def IsActive(self):
             if FreeCAD.ActiveDocument is None:
                 return False
-            locator_references, parts = _selection_data()
-            return bool(locator_references) and bool(parts)
+            locator_references, parts, occurrences = _selection_data()
+            return (
+                bool(locator_references)
+                and bool(parts)
+                and len(occurrences) <= 1
+            )
 
 
     def repair_bolt_connection_view_providers(doc):

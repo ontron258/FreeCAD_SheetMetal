@@ -217,6 +217,44 @@ class CollaborationTransactionTests(unittest.TestCase):
         self.assertEqual(len(target.Sketch.Constraints), 1)
         self.assertAlmostEqual(target.Sketch.Geometry[0].length(), 20.0)
 
+    def test_sketch_constraint_expression_is_replayed_semantically(self):
+        source = self.new_document("ExpressionSource")
+        cage = source.addObject("App::VarSet", "Cage")
+        cage.addProperty("App::PropertyLength", "RowWidth", "Dimensions")
+        cage.RowWidth = 1524
+        sketch = source.addObject("Sketcher::SketchObject", "Sketch")
+        line_index = sketch.addGeometry(
+            Part.LineSegment(App.Vector(0, 0, 0), App.Vector(60, 0, 0)),
+            False,
+        )
+        sketch.addConstraint(Sketcher.Constraint("Distance", line_index, 60.0))
+        bootstrap_document(source)
+        target = self.clone_document_objects(source, "ExpressionTarget")
+        recorder = self.recorder(source)
+
+        source.openTransaction("Modify sketch constraints")
+        sketch.setExpression("Constraints[0]", "Cage.RowWidth")
+        source.commitTransaction()
+
+        packet = recorder.packets[0]
+        expression_operation = next(
+            operation
+            for operation in packet.operations
+            if operation.property_name == "ExpressionEngine"
+        )
+        self.assertEqual(
+            expression_operation.structured_value,
+            {
+                "kind": "expression_engine",
+                "expressions": [["Constraints[0]", "Cage.RowWidth"]],
+            },
+        )
+        apply_packet(target, packet, validate_document_uid=False)
+        self.assertEqual(
+            target.Sketch.ExpressionEngine,
+            [("Constraints[0]", "Cage.RowWidth")],
+        )
+
     def test_uuid_link_replay_does_not_require_matching_internal_names(self):
         source = self.new_document("LinkSource")
         owner = source.addObject("App::FeaturePython", "Owner")

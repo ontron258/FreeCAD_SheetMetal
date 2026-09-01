@@ -65,6 +65,18 @@ def _edited_property_key(state: "_TransactionState") -> Optional[PropertyKey]:
     return matches[0] if len(matches) == 1 else None
 
 
+def _structured_property_value(obj, property_name: str, uid_resolver):
+    property_type = obj.getTypeIdOfProperty(property_name)
+    if property_type == "App::PropertyExpressionEngine":
+        return {
+            "kind": "expression_engine",
+            "expressions": [list(item) for item in obj.ExpressionEngine],
+        }
+    if link_kind(property_type) is not None:
+        return serialize_link_property(obj, property_name, uid_resolver)
+    return None
+
+
 @dataclass
 class _TransactionState:
     document: object
@@ -273,7 +285,7 @@ class TransactionRecorder:
                         property_name=property_name,
                         property_type=property_type,
                         after_content=try_dump_property(obj, property_name),
-                        structured_value=serialize_link_property(
+                        structured_value=_structured_property_value(
                             obj, property_name, self._uid
                         ),
                     )
@@ -318,10 +330,8 @@ class TransactionRecorder:
                     property_type=obj.getTypeIdOfProperty(property_name),
                     before_content=state.before.get(key),
                     after_content=try_dump_property(obj, property_name),
-                    structured_value=(
-                        serialize_link_property(obj, property_name, self._uid)
-                        if link_kind(obj.getTypeIdOfProperty(property_name))
-                        else None
+                    structured_value=_structured_property_value(
+                        obj, property_name, self._uid
                     ),
                 )
             )

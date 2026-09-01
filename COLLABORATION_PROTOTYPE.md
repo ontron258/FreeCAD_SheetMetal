@@ -51,6 +51,11 @@ packets must remain the fallback for unknown workbenches.
 - Encodes same-document link, link-list, link-subelement, and
   link-subelement-list targets by collaboration UUID instead of relying on
   matching FreeCAD internal names.
+- Replays `App::PropertyExpressionEngine` semantically with `setExpression`.
+  FreeCAD's native `restorePropertyContent` accepts this property without an
+  error but does not restore sketch constraint expressions, which previously
+  left a peer with the literal constraint value instead of its configuration
+  expression.
 - Provides an asynchronous client and cooperative FreeCAD document session
   that submit local transactions, apply remote transactions without echo, and
   catch a late client up from the revision log.
@@ -251,7 +256,7 @@ has one upload the checkpoint, has the other restore it, synchronizes an edit,
 compares both client hashes, launches a separate headless validator, and
 requires its independently reconstructed revision to match.
 
-The current suite contains 33 tests. A manual persistent client launcher for
+The current suite contains 34 tests. A manual persistent client launcher for
 local two-window trials is available at `tools/live_collaboration_client.py`;
 it reads the documented `FREECAD_COLLAB_LIVE_*` environment variables and is
 passed to `FreeCAD.exe` as a positional startup script. The launcher preloads

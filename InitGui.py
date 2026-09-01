@@ -78,6 +78,7 @@ class SMWorkbench(Workbench):
         import SheetMetalSketch
         import SheetMetalShapedFlangeCmd
         import SheetMetalFromSolid
+        from freecad_collaboration.commands import register_commands
 
         self.list = [
             "SheetMetal_BaseShape",
@@ -114,6 +115,10 @@ class SMWorkbench(Workbench):
         self.appendToolbar(FreeCAD.Qt.translate("SheetMetal", "Sheet Metal"), self.list)
         # Create a new menu.
         self.appendMenu(FreeCAD.Qt.translate("SheetMetal", "&Sheet Metal"), self.list)
+        self.appendMenu(
+            [FreeCAD.Qt.translate("SheetMetal", "&Sheet Metal"), "&Collaboration"],
+            register_commands(),
+        )
         # # Append a submenu to an existing menu.
         # self.appendMenu(["An existing Menu","My submenu"],self.list)
         Gui.addPreferencePage(os.path.join(SMWBPath, "Resources/panels/SMprefs.ui"), "SheetMetal")

@@ -29,6 +29,9 @@ packets must remain the fallback for unknown workbenches.
   generated geometry. Definition payloads exclude native ZIP timestamps;
   Part shapes use sorted topology, mass properties, bounds, and curve/surface
   samples instead of process-unstable native BRep bytes.
+- Normalizes save/reload-safe quantities, matrices, sketch geometry, null and
+  aggregate shapes, generated labels, and recompute caches so a complex model
+  compares identically after a normal FCStd reopen.
 - Stores accepted packets in an append-only SQLite revision log.
 - Rejects stale base revisions and incompatible environment IDs.
 - Treats a repeated transaction UUID as an idempotent retry.
@@ -46,8 +49,9 @@ packets must remain the fallback for unknown workbenches.
   incoming packets on FreeCAD's main GUI thread.
 - Synchronizes edits bidirectionally between two independent FreeCAD Python
   processes through the real relay protocol.
-- Stores an immutable native FreeCAD revision-zero checkpoint so an empty
-  document can join late, restore the model, and replay the remaining log.
+- Stores an immutable, complete FCStd revision-zero checkpoint so an empty GUI
+  document can join late through FreeCAD's normal load path and replay the
+  remaining log. Legacy in-memory persistence checkpoints remain readable.
 - Provides cooperative UUID-addressed feature locks with expiry, renewal, and
   disconnect cleanup. Packets touching an object locked by another client are
   rejected before sequencing.
@@ -132,10 +136,11 @@ To start a local session:
 
 1. Run the relay command above.
 2. Open the model and choose **Share current**. The server stores its canonical
-   state and native revision-zero checkpoint.
+   state and a complete native FCStd revision-zero checkpoint without replacing
+   the source file.
 3. On another FreeCAD client, create an empty document, enter the same document
-   UUID, and choose **Join**. The client downloads the checkpoint and catches up
-   through the transaction log.
+   UUID, and choose **Join**. The client replaces that empty document with the
+   downloaded FCStd checkpoint and catches up through the transaction log.
 4. Before editing a shared feature, select it in the tree or 3D view and choose
    **Lock selection**. Locks are renewed every minute and removed on disconnect.
 5. Watch **Headless validation** for the independent result. If simultaneous
@@ -177,6 +182,9 @@ identity.
   workbench coverage.
 - Geometry and Sketcher list elements do not yet receive collaboration-level
   identifiers.
+- Labels and known generated drawing names are synchronized by packets but are
+  excluded from canonical state hashes because FreeCAD/Python features may
+  renumber them during an otherwise equivalent save/reopen.
 - Face/edge subelement references still rely on FreeCAD's topological naming.
 - View-provider state is intentionally not recorded yet.
 - Locks are cooperative and object-granular. Automatic locking when a task panel
@@ -216,6 +224,11 @@ The second command launches two independent hidden `freecad.exe` GUI processes,
 has one upload the checkpoint, has the other restore it, synchronizes an edit,
 compares both client hashes, launches a separate headless validator, and
 requires its independently reconstructed revision to match.
+
+The current suite contains 28 tests. A manual persistent client launcher for
+local two-window trials is available at `tools/live_collaboration_client.py`;
+it reads the documented `FREECAD_COLLAB_LIVE_*` environment variables and is
+passed to `FreeCAD.exe` as a positional startup script.
 
 ## Next slice
 

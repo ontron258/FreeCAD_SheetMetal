@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import FreeCAD as App
+import Part
 
 from freecad_collaboration import (
     CheckpointConflictError,
@@ -80,6 +81,29 @@ class RevisionStoreTests(unittest.TestCase):
         self.assertEqual(first.result_hash, cloned.result_hash)
         target.Box.Visibility = not target.Box.Visibility
         self.assertEqual(first, document_state(target))
+
+    def test_state_hash_accepts_null_shape_result_property(self):
+        document = self.new_document("NullShapeHash")
+        document.addObject("PartDesign::Feature", "Bend")
+        bootstrap_document(document)
+
+        state = document_state(document)
+
+        self.assertEqual(state.object_count, len(document.Objects))
+        self.assertGreater(state.result_property_count, 0)
+
+    def test_state_hash_accepts_compound_without_center_of_mass(self):
+        document = self.new_document("CompoundHash")
+        feature = document.addObject("PartDesign::Feature", "SketchLikeResult")
+        feature.Shape = Part.makeCompound(
+            [Part.makeLine(App.Vector(0, 0, 0), App.Vector(10, 0, 0))]
+        )
+        bootstrap_document(document)
+
+        state = document_state(document)
+
+        self.assertEqual(state.object_count, len(document.Objects))
+        self.assertGreater(state.result_property_count, 0)
 
     def test_revision_zero_checkpoint_is_immutable(self):
         source = self.new_document("CheckpointSource")

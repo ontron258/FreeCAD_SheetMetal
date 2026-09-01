@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import urllib.request
 import uuid
 
 import FreeCAD as App
@@ -11,6 +12,7 @@ from PySide import QtCore, QtWidgets
 
 from .identity import bootstrap_document, ensure_object_uid
 from .environment import default_environment_id, write_environment_lock
+from .checkpoint import open_checkpoint
 from .qt_session import QtDocumentSession
 
 
@@ -44,6 +46,18 @@ class CollaborationController(QtCore.QObject):
             raise RuntimeError("Open or create a document first")
         self.disconnect(document)
         download_checkpoint = not bool(document.Objects) and not share
+        if download_checkpoint:
+            if not document_uid:
+                raise RuntimeError("Enter the shared document UUID before joining")
+            checkpoint_url = (
+                f"{base_url.rstrip('/')}/documents/{document_uid}/checkpoint"
+            )
+            with urllib.request.urlopen(checkpoint_url, timeout=30) as response:
+                checkpoint = response.read()
+            App.closeDocument(document.Name)
+            document = open_checkpoint(checkpoint)
+            App.setActiveDocument(document.Name)
+            download_checkpoint = False
         bootstrap_document(document)
         document.recompute()
         session = QtDocumentSession(
@@ -52,6 +66,7 @@ class CollaborationController(QtCore.QObject):
             client_id,
             environment_id=environment_id,
             document_uid=document_uid or str(document.Uid),
+            native_checkpoints=True,
             parent=self,
         )
         self.sessions[document.Name] = session
@@ -203,7 +218,7 @@ class CollaborationPanel(QtWidgets.QWidget):
             return
         self._bind_session(session)
         action = "Sharing" if share else "Joining"
-        self._append(f"{action} {document.Label} as {session.document_uid}")
+        self._append(f"{action} {session.document.Label} as {session.document_uid}")
         self.refresh(session)
 
     def _disconnect(self):

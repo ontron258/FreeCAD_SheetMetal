@@ -8,6 +8,7 @@ import time
 from PySide import QtCore
 
 from .conflicts import packets_conflict
+from .checkpoint import native_checkpoint_bytes
 from .packet import TransactionPacket
 from .recorder import TransactionRecorder
 from .replay import apply_packet
@@ -30,12 +31,14 @@ class QtDocumentSession(QtCore.QObject):
         environment_id: str = "",
         document_uid: str | None = None,
         poll_interval_ms: int = 20,
+        native_checkpoints: bool = False,
         parent=None,
     ):
         super().__init__(parent)
         self.document = document
         self.document_uid = document_uid or str(document.Uid)
         self.environment_id = environment_id
+        self.native_checkpoints = native_checkpoints
         self.revision = 0
         self.status = "disconnected"
         self.last_error = ""
@@ -70,12 +73,17 @@ class QtDocumentSession(QtCore.QObject):
 
     def start_share(self):
         self._set_status("connecting")
+        checkpoint = (
+            native_checkpoint_bytes(self.document)
+            if self.native_checkpoints
+            else bytes(self.document.dumpContent(9))
+        )
         self.transport.start(
             register=(
                 self.document.Label,
                 document_state(self.document),
                 self.environment_id,
-                bytes(self.document.dumpContent(9)),
+                checkpoint,
             )
         )
         self.timer.start()

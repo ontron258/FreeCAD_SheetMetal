@@ -11,6 +11,7 @@ import uuid
 from aiohttp import ClientSession
 import FreeCAD as App
 
+from .checkpoint import open_checkpoint
 from .environment import default_environment_id
 from .packet import TransactionPacket
 from .replay import apply_packet
@@ -47,8 +48,10 @@ async def validate_job(http, base_url, job, worker_id, environment_id):
             response.raise_for_status()
             records = await response.json()
 
-        document = App.newDocument(f"CollaborationValidation{uuid.uuid4().hex[:10]}")
-        document.restoreContent(bytearray(checkpoint))
+        document = open_checkpoint(
+            checkpoint,
+            document_name=f"CollaborationValidation{uuid.uuid4().hex[:10]}",
+        )
         document.recompute()
         reached_revision = 0
         for record in records:

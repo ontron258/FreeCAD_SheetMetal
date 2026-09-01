@@ -17,6 +17,10 @@ IGNORED_PROPERTIES = {
     # Python proxies are reconstructed from the pinned addon environment. Their
     # pickled runtime representation is not a stable protocol contract.
     "Proxy",
+    # Presentation/generated naming is allowed to normalize when a document is
+    # reopened. Object identity is carried by CollaborationUid, not Label.
+    "Label",
+    "DrawingName",
 }
 
 RESULT_PROPERTY_NAMES = {
@@ -77,6 +81,8 @@ def _hash_field(digest, value: str) -> None:
 
 
 def _is_transient(obj, property_name: str) -> bool:
+    if property_name.startswith("Cache_"):
+        return True
     try:
         return "Transient" in obj.getTypeOfProperty(property_name)
     except Exception:
@@ -91,9 +97,9 @@ def _number(value):
     value = float(value)
     if not math.isfinite(value):
         return str(value)
-    if abs(value) < 1e-12:
+    if abs(value) < 1e-10:
         value = 0.0
-    return format(value, ".12g")
+    return format(value, ".10g")
 
 
 def _vector(value):
@@ -110,6 +116,20 @@ def _bounds(shape):
         _number(bounds.YMax),
         _number(bounds.ZMax),
     ]
+
+
+def _optional_number_attribute(value, name):
+    try:
+        return _number(getattr(value, name))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _optional_vector_attribute(value, name):
+    try:
+        return _vector(getattr(value, name))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
 
 
 def _sorted_signatures(values):
@@ -163,10 +183,13 @@ def _shape_signature(shape):
         "shape_type": str(shape.ShapeType),
         "orientation": str(shape.Orientation),
         "bounds": _bounds(shape),
-        "area": _number(shape.Area),
-        "volume": _number(shape.Volume),
-        "length": _number(shape.Length),
-        "center": _vector(shape.CenterOfMass),
+        # Aggregate and lower-dimensional TopoShapes do not consistently
+        # expose every mass property.  Keep the schema stable by representing
+        # unavailable metrics explicitly instead of rejecting valid geometry.
+        "area": _optional_number_attribute(shape, "Area"),
+        "volume": _optional_number_attribute(shape, "Volume"),
+        "length": _optional_number_attribute(shape, "Length"),
+        "center": _optional_vector_attribute(shape, "CenterOfMass"),
         "counts": {
             "solids": len(shape.Solids),
             "shells": len(shape.Shells),
@@ -187,7 +210,15 @@ def _result_property_digest(obj, property_name: str, property_type: str) -> str:
 
     value = getattr(obj, property_name)
     shapes = value if isinstance(value, (list, tuple)) else [value]
-    if shapes and all(hasattr(shape, "ShapeType") for shape in shapes):
+    # Reading ``ShapeType`` from a null TopoShape raises in FreeCAD, so do not
+    # use ``hasattr(shape, "ShapeType")`` as the shape-type probe.  The
+    # declared property type is authoritative and also handles empty shape
+    # lists without falling back to timestamped native persistence payloads.
+    if property_type in {
+        "Part::PropertyPartShape",
+        "Part::PropertyTopoShapeList",
+        "Part::PropertyShapeCache",
+    }:
         canonical = json.dumps(
             [_shape_signature(shape) for shape in shapes],
             sort_keys=True,
@@ -196,6 +227,31 @@ def _result_property_digest(obj, property_name: str, property_type: str) -> str:
         return hashlib.sha256(canonical.encode("ascii")).hexdigest()
     payload = obj.dumpPropertyContent(property_name, Compression=9)
     return persistence_digest(payload)
+
+
+def _definition_property_digest(obj, property_name: str, property_type: str) -> str:
+    """Hash common value types semantically across native save/reload cycles."""
+
+    value = getattr(obj, property_name)
+    if property_type == "App::PropertyMatrix":
+        canonical = [_number(number) for number in value.A]
+    elif property_type == "Part::PropertyGeometryList":
+        canonical = [
+            {
+                "geometry": type(geometry).__name__,
+                "shape": _shape_signature(geometry.toShape()),
+            }
+            for geometry in value
+        ]
+    elif property_type.startswith("App::Property") and hasattr(value, "Value"):
+        canonical = {
+            "value": _number(value.Value),
+            "unit": str(getattr(value, "Unit", "")),
+        }
+    else:
+        return persistence_digest(obj.dumpPropertyContent(property_name, Compression=9))
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
 def document_state(document) -> DocumentState:
@@ -235,8 +291,9 @@ def document_state(document) -> DocumentState:
                         obj, property_name, property_type
                     )
                 else:
-                    payload = obj.dumpPropertyContent(property_name, Compression=9)
-                    payload_hash = persistence_digest(payload)
+                    payload_hash = _definition_property_digest(
+                        obj, property_name, property_type
+                    )
             except Exception as exc:
                 raise StateHashError(
                     f"cannot hash {obj.Name}.{property_name}: {exc}"

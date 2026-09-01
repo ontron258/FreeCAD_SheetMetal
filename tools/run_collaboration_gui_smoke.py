@@ -42,11 +42,16 @@ def run():
             "dock_visible": dock.isVisible(),
             "document_name": panel.document_name.text(),
             "document_uid": panel.document_uid.text(),
+            "environment_is_lock": panel.environment.text().startswith("lock:"),
+            "validation_text": panel.validation.text(),
+            "conflict_recovery_visible": panel.discard_conflict_button.isVisible(),
             "show_command_registered": "Collaboration_ShowPanel" in Gui.listCommands(),
             "disconnect_command_registered": "Collaboration_Disconnect" in Gui.listCommands(),
         }
         if result["dock_object_name"] != DOCK_OBJECT_NAME:
             raise RuntimeError("collaboration dock has the wrong object name")
+        if not result["environment_is_lock"]:
+            raise RuntimeError("collaboration panel did not generate an environment lock ID")
     except Exception as exc:
         result = {
             "ok": False,

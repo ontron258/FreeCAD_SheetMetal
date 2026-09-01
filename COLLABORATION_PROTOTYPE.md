@@ -26,7 +26,9 @@ packets must remain the fallback for unknown workbenches.
 - Replays packets inside one FreeCAD transaction and can suppress a target
   recorder to prevent network echo.
 - Computes separate canonical hashes for the parametric definition and the
-  generated geometry. Native ZIP timestamps are excluded from the hash.
+  generated geometry. Definition payloads exclude native ZIP timestamps;
+  Part shapes use sorted topology, mass properties, bounds, and curve/surface
+  samples instead of process-unstable native BRep bytes.
 - Stores accepted packets in an append-only SQLite revision log.
 - Rejects stale base revisions and incompatible environment IDs.
 - Treats a repeated transaction UUID as an idempotent retry.
@@ -51,10 +53,18 @@ packets must remain the fallback for unknown workbenches.
   rejected before sequencing.
 - Registers a dockable GUI panel with share, join, disconnect, lock-selection,
   status, revision, document UUID, and validation/error reporting controls.
-- Generates a default compatibility identity from the exact FreeCAD build,
-  Python version, packet schema, and collaboration-core version. A deployment
-  can override it with `FREECAD_COLLABORATION_ENVIRONMENT_ID` while an addon
-  lockfile format is developed.
+- Automatically rebases simultaneous disjoint edits: unaccepted local
+  transactions are undone, missing revisions are applied, and local packets
+  are replayed and resubmitted. Same-address edits enter an explicit conflict
+  state and retain the local result until the user discards it.
+- Generates a canonical environment lockfile from the exact FreeCAD build,
+  Python and protocol versions, addon Git revision, and a path-independent
+  digest of relevant addon code. A deployment may override its identity with
+  `FREECAD_COLLABORATION_ENVIRONMENT_ID`.
+- Provides a separate headless FreeCAD worker that reconstructs accepted
+  revisions from checkpoint plus packets and independently validates both
+  definition and generated-geometry hashes. Results are persisted and
+  broadcast to GUI clients.
 
 ## Local relay
 
@@ -78,12 +88,16 @@ GET  /documents/{document_uid}/head
 PUT  /documents/{document_uid}/checkpoint
 GET  /documents/{document_uid}/checkpoint
 GET  /documents/{document_uid}/revisions?after={revision}
+GET  /validation/jobs?limit={count}
+GET  /documents/{document_uid}/revisions/{revision}/validation
+POST /documents/{document_uid}/revisions/{revision}/validation
 GET  /documents/{document_uid}/ws?client_id={client_id}
 ```
 
 The WebSocket currently accepts `submit`, `state_report`, `acquire_locks`, and
-`release_locks` messages. It is a sequencer rather than an authoritative CAD
-worker: the submitting client still supplies the resulting state hashes.
+`release_locks` messages. Accepted revisions are initially provisional because
+the submitting client supplies their state hashes; the independent validator
+then marks each revision valid or invalid.
 
 `freecad_collaboration.session.DocumentSession` now connects the transaction
 recorder and replayer to this protocol. Its network methods are asynchronous,
@@ -95,7 +109,18 @@ adapter. `ThreadedRelayTransport` owns the asyncio event loop and WebSocket on
 a daemon thread; a `QTimer` drains immutable messages and performs every
 FreeCAD document mutation on the Qt thread. Current session states are
 `disconnected`, `connecting`, `connected`, `submitting`, `catching_up`,
-`validating`, `synchronized`, and `error`.
+`rebasing`, `conflict`, `validating`, `synchronized`, and `error`.
+
+Run a validator continuously beside the relay:
+
+```powershell
+& $freecadPython -m freecad_collaboration.validator `
+    --server http://127.0.0.1:8765 `
+    --worker-id local-validator
+```
+
+Use `--once` for CI or smoke tests. Its environment lock identity must match
+the document's identity.
 
 ## GUI prototype
 
@@ -113,6 +138,17 @@ To start a local session:
    through the transaction log.
 4. Before editing a shared feature, select it in the tree or 3D view and choose
    **Lock selection**. Locks are renewed every minute and removed on disconnect.
+5. Watch **Headless validation** for the independent result. If simultaneous
+   work overlaps the same object property, inspect the retained local result
+   and choose **Discard conflicting local edits** to return to server state.
+
+Use **Save environment lockfile** to write the complete JSON manifest. The same
+operation is available on the command line:
+
+```powershell
+& $freecadPython -m freecad_collaboration.environment `
+    --output collaboration-environment.lock.json
+```
 
 Joining a non-empty document remains supported when it is already an identical
 copy of revision zero; no checkpoint is downloaded in that case.
@@ -144,15 +180,17 @@ identity.
 - Face/edge subelement references still rely on FreeCAD's topological naming.
 - View-provider state is intentionally not recorded yet.
 - Locks are cooperative and object-granular. Automatic locking when a task panel
-  starts editing, property-level locks, and an automatic rebase workflow are not
-  implemented yet.
+  starts editing and property-level locks are not implemented yet.
+- Automatic rebase covers address-disjoint transactions. Semantically
+  mergeable edits to the same list-valued property still require a future
+  workbench-aware merge layer.
 - A submission rejected because another client already holds a lock leaves the
   local client divergent; the current recovery is to disconnect and join into
   a new empty document. A one-click reset/rebase workflow remains.
-- The environment ID is currently supplied by the caller; generation from a
-  FreeCAD/addon Git lockfile has not been implemented.
-- The relay trusts the submitting client's resulting hashes and has no
-  authentication or network hardening yet.
+- Headless validation is asynchronous and currently requires a separately
+  started worker. Invalid revisions are flagged but not automatically rolled
+  back or quarantined.
+- The relay has no authentication or network hardening yet.
 - Object creation replay assumes the receiving FreeCAD installation provides
   the same registered object types and Python proxies.
 - This worktree starts at committed revision `6c5fcff`; unrelated uncommitted
@@ -164,12 +202,7 @@ Run with the bundled FreeCAD Python interpreter:
 
 ```powershell
 $freecadPython = 'C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\bin\python.exe'
-& $freecadPython -m unittest `
-    CollaborationTests.test_transactions `
-    CollaborationTests.test_revision_store `
-    CollaborationTests.test_relay `
-    CollaborationTests.test_session `
-    CollaborationTests.test_qt_session
+& $freecadPython -m unittest discover -v -s CollaborationTests
 ```
 
 Run the separate-process smoke test:
@@ -181,7 +214,8 @@ Run the separate-process smoke test:
 
 The second command launches two independent hidden `freecad.exe` GUI processes,
 has one upload the checkpoint, has the other restore it, synchronizes an edit,
-and compares both definition and result hashes.
+compares both client hashes, launches a separate headless validator, and
+requires its independently reconstructed revision to match.
 
 ## Next slice
 
@@ -195,9 +229,9 @@ and compares both definition and result hashes.
 4. Connect two GUI instances through the localhost WebSocket relay.
    **Implemented, including the dock panel and two-process GUI smoke test.**
 5. Add conflict detection beyond base revision, at the property address level.
-   **Object-level cooperative locks are implemented; task-panel integration,
-   property granularity, and rebase remain.**
+   **Object-level cooperative locks and automatic address-disjoint rebase are
+   implemented; task-panel integration and semantic list merging remain.**
 6. Add authentication, authorization, TLS termination, packet-size limits,
    schema validation, and database lifecycle management before non-local use.
-7. Evaluate an on-demand headless validator after client-to-client replay is
-   reliable.
+7. Add an independent headless validator. **Implemented as a polling worker;
+   automatic worker supervision and invalid-revision quarantine remain.**

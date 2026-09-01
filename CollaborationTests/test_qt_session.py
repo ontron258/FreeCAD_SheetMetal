@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 import socket
@@ -17,6 +18,7 @@ from PySide import QtCore
 
 from freecad_collaboration import bootstrap_document, get_object_uid
 from freecad_collaboration.qt_session import QtDocumentSession
+from freecad_collaboration.validator import validate_pending
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -167,6 +169,128 @@ class QtDocumentSessionTests(unittest.TestCase):
             and abs(float(source.Box.Width) - 27.0) < 1e-9
             and source_session.status == "synchronized"
             and target_session.status == "synchronized"
+        )
+        reports = asyncio.run(
+            validate_pending(self.server_url, "qt-headless-worker", "qt-test")
+        )
+        self.assertEqual([report["revision"] for report in reports], [1, 2])
+        self.assertTrue(all(report["valid"] for report in reports))
+        self._wait_until(
+            lambda: source_session.validation_revision == 2
+            and target_session.validation_revision == 2
+            and source_session.validation_status == "valid"
+            and target_session.validation_status == "valid"
+        )
+
+    def test_simultaneous_disjoint_edits_are_rebased_automatically(self):
+        source = App.newDocument("RebaseSource")
+        self.documents.append(source)
+        box = source.addObject("Part::Box", "Box")
+        bootstrap_document(source)
+        source.recompute()
+        logical_uid = str(source.Uid)
+
+        target = App.newDocument("RebaseTarget")
+        self.documents.append(target)
+        source_session = QtDocumentSession(
+            source,
+            self.server_url,
+            "rebase-source",
+            environment_id="qt-test",
+            document_uid=logical_uid,
+        )
+        target_session = QtDocumentSession(
+            target,
+            self.server_url,
+            "rebase-target",
+            environment_id="qt-test",
+            document_uid=logical_uid,
+        )
+        self.sessions.extend((source_session, target_session))
+        source_session.start_share()
+        self._wait_until(lambda: source_session.status == "connected")
+        target_session.start_join(download_checkpoint=True)
+        self._wait_until(lambda: target_session.status == "connected")
+
+        source.openTransaction("Concurrent length")
+        box.Length = 31
+        source.recompute()
+        source.commitTransaction()
+        target.openTransaction("Concurrent width")
+        target.Box.Width = 42
+        target.recompute()
+        target.commitTransaction()
+
+        self._wait_until(
+            lambda: source_session.revision == 2
+            and target_session.revision == 2
+            and source_session.status == "synchronized"
+            and target_session.status == "synchronized"
+            and abs(float(source.Box.Length) - 31) < 1e-9
+            and abs(float(target.Box.Length) - 31) < 1e-9
+            and abs(float(source.Box.Width) - 42) < 1e-9
+            and abs(float(target.Box.Width) - 42) < 1e-9,
+            timeout=15,
+        )
+
+    def test_same_property_conflict_can_discard_local_edit(self):
+        source = App.newDocument("ConflictGuiSource")
+        self.documents.append(source)
+        box = source.addObject("Part::Box", "Box")
+        bootstrap_document(source)
+        source.recompute()
+        logical_uid = str(source.Uid)
+        target = App.newDocument("ConflictGuiTarget")
+        self.documents.append(target)
+
+        sessions = [
+            QtDocumentSession(
+                source,
+                self.server_url,
+                "conflict-source",
+                environment_id="qt-test",
+                document_uid=logical_uid,
+            ),
+            QtDocumentSession(
+                target,
+                self.server_url,
+                "conflict-target",
+                environment_id="qt-test",
+                document_uid=logical_uid,
+            ),
+        ]
+        self.sessions.extend(sessions)
+        sessions[0].start_share()
+        self._wait_until(lambda: sessions[0].status == "connected")
+        sessions[1].start_join(download_checkpoint=True)
+        self._wait_until(lambda: sessions[1].status == "connected")
+
+        source.openTransaction("Competing source length")
+        box.Length = 33
+        source.recompute()
+        source.commitTransaction()
+        target.openTransaction("Competing target length")
+        target.Box.Length = 44
+        target.recompute()
+        target.commitTransaction()
+
+        self._wait_until(lambda: any(session.status == "conflict" for session in sessions))
+        loser_index = 0 if sessions[0].status == "conflict" else 1
+        winner_index = 1 - loser_index
+        loser = sessions[loser_index]
+        winner = sessions[winner_index]
+        loser_document = source if loser_index == 0 else target
+        winner_document = target if winner_index == 1 else source
+        self._wait_until(
+            lambda: winner.revision == 1 and winner.status == "synchronized"
+        )
+        accepted_length = float(winner_document.Box.Length)
+        self.assertNotEqual(float(loser_document.Box.Length), accepted_length)
+
+        loser.discard_local_conflict()
+        self._wait_until(
+            lambda: loser.status == "synchronized"
+            and abs(float(loser_document.Box.Length) - accepted_length) < 1e-9
         )
 
 

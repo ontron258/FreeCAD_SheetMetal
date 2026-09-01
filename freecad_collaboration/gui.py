@@ -10,7 +10,7 @@ import FreeCADGui as Gui
 from PySide import QtCore, QtWidgets
 
 from .identity import bootstrap_document, ensure_object_uid
-from .environment import default_environment_id
+from .environment import default_environment_id, write_environment_lock
 from .qt_session import QtDocumentSession
 
 
@@ -123,6 +123,17 @@ class CollaborationPanel(QtWidgets.QWidget):
         buttons.addWidget(self.disconnect_button)
         layout.addLayout(buttons)
 
+        self.discard_conflict_button = QtWidgets.QPushButton(
+            "Discard conflicting local edits"
+        )
+        self.discard_conflict_button.setToolTip(
+            "Return this document to the latest accepted server revision"
+        )
+        layout.addWidget(self.discard_conflict_button)
+
+        self.save_lockfile_button = QtWidgets.QPushButton("Save environment lockfile")
+        layout.addWidget(self.save_lockfile_button)
+
         lock_buttons = QtWidgets.QHBoxLayout()
         self.lock_button = QtWidgets.QPushButton("Lock selection")
         self.unlock_button = QtWidgets.QPushButton("Unlock selection")
@@ -135,10 +146,12 @@ class CollaborationPanel(QtWidgets.QWidget):
         self.status = QtWidgets.QLabel("disconnected")
         self.revision = QtWidgets.QLabel("0")
         self.lock_count = QtWidgets.QLabel("0")
+        self.validation = QtWidgets.QLabel("not validated")
         status_form.addRow("Active document", self.document_name)
         status_form.addRow("Status", self.status)
         status_form.addRow("Revision", self.revision)
         status_form.addRow("Feature locks", self.lock_count)
+        status_form.addRow("Headless validation", self.validation)
         layout.addLayout(status_form)
 
         self.log = QtWidgets.QPlainTextEdit()
@@ -150,6 +163,8 @@ class CollaborationPanel(QtWidgets.QWidget):
         self.share_button.clicked.connect(lambda: self._start(True))
         self.join_button.clicked.connect(lambda: self._start(False))
         self.disconnect_button.clicked.connect(self._disconnect)
+        self.discard_conflict_button.clicked.connect(self._discard_conflict)
+        self.save_lockfile_button.clicked.connect(self._save_lockfile)
         self.lock_button.clicked.connect(lambda: self._set_selection_locked(True))
         self.unlock_button.clicked.connect(lambda: self._set_selection_locked(False))
 
@@ -216,6 +231,29 @@ class CollaborationPanel(QtWidgets.QWidget):
             self.session.release_locks(object_uids)
             self._append(f"Released {len(object_uids)} feature lock(s)")
 
+    def _discard_conflict(self):
+        if self.session is None:
+            return
+        self.session.discard_local_conflict()
+        self._append("Discarded conflicting local edits")
+
+    def _save_lockfile(self):
+        path, _filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save collaboration environment lockfile",
+            "collaboration-environment.lock.json",
+            "JSON files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            identity = write_environment_lock(path)
+            self.environment.setText(identity)
+            self._save_preferences()
+            self._append(f"Saved environment lockfile: {identity}")
+        except Exception as exc:
+            self._append(f"ERROR: {exc}")
+
     def _bind_session(self, session):
         if self.session is session:
             return
@@ -245,6 +283,9 @@ class CollaborationPanel(QtWidgets.QWidget):
             self._append(f"{message_type}: revision {self.session.revision}")
         elif message_type == "lock_state":
             self._append(f"feature locks: {len(message.get('locks', []))}")
+        elif message_type == "validation_state":
+            status = "valid" if message.get("valid") else "INVALID"
+            self._append(f"headless validation: revision {message['revision']} {status}")
         elif message_type in {"error", "transport_error"}:
             self._append(f"ERROR: {message.get('message', message_type)}")
         self.refresh()
@@ -263,12 +304,17 @@ class CollaborationPanel(QtWidgets.QWidget):
             self.status.setText("disconnected")
             self.revision.setText("0")
             self.lock_count.setText("0")
+            self.validation.setText("not validated")
             if document is not None and not self.document_uid.hasFocus():
                 self.document_uid.setText(str(document.Uid))
         else:
             self.status.setText(active_session.status)
             self.revision.setText(str(active_session.revision))
             self.lock_count.setText(str(len(active_session.locks)))
+            validation = active_session.validation_status
+            if active_session.validation_revision:
+                validation += f" (revision {active_session.validation_revision})"
+            self.validation.setText(validation)
             if not self.document_uid.hasFocus():
                 self.document_uid.setText(active_session.document_uid)
         enabled = document is not None and active_session is None
@@ -277,6 +323,9 @@ class CollaborationPanel(QtWidgets.QWidget):
         self.disconnect_button.setEnabled(active_session is not None)
         self.lock_button.setEnabled(active_session is not None)
         self.unlock_button.setEnabled(active_session is not None)
+        self.discard_conflict_button.setEnabled(
+            active_session is not None and active_session.status == "conflict"
+        )
 
 
 _controller = None

@@ -88,6 +88,29 @@ class ObjectLock:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class ValidationJob:
+    document_uid: str
+    revision: int
+    environment_id: str
+
+
+@dataclass(frozen=True)
+class ValidationReport:
+    document_uid: str
+    revision: int
+    worker_id: str
+    environment_id: str
+    definition_hash: str
+    result_hash: str
+    environment_matches: bool
+    definition_matches: bool
+    result_matches: bool
+    valid: bool
+    error: str
+    validated_at: str
+
+
 class RevisionStore:
     """Serialize packet acceptance and retain an immutable revision log."""
 
@@ -157,6 +180,24 @@ class RevisionStore:
                 expires_at REAL NOT NULL,
                 PRIMARY KEY (document_uid, object_uid),
                 FOREIGN KEY (document_uid) REFERENCES documents(document_uid)
+            );
+
+            CREATE TABLE IF NOT EXISTS validation_results (
+                document_uid TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                worker_id TEXT NOT NULL,
+                environment_id TEXT NOT NULL,
+                definition_hash TEXT NOT NULL,
+                result_hash TEXT NOT NULL,
+                environment_matches INTEGER NOT NULL,
+                definition_matches INTEGER NOT NULL,
+                result_matches INTEGER NOT NULL,
+                valid INTEGER NOT NULL,
+                error TEXT NOT NULL,
+                validated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (document_uid, revision),
+                FOREIGN KEY (document_uid, revision)
+                    REFERENCES revisions(document_uid, revision)
             );
             """
         )
@@ -512,6 +553,118 @@ class RevisionStore:
             (document_uid,),
         ).fetchall()
         return [self._record(row) for row in rows]
+
+    def pending_validation_jobs(self, limit: int = 10) -> List[ValidationJob]:
+        rows = self.connection.execute(
+            """
+            SELECT r.document_uid, r.revision, r.environment_id
+            FROM revisions AS r
+            LEFT JOIN validation_results AS v
+              ON v.document_uid = r.document_uid AND v.revision = r.revision
+            WHERE v.revision IS NULL
+            ORDER BY r.accepted_at, r.document_uid, r.revision
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [
+            ValidationJob(
+                document_uid=row["document_uid"],
+                revision=int(row["revision"]),
+                environment_id=row["environment_id"],
+            )
+            for row in rows
+        ]
+
+    def report_validation(
+        self,
+        document_uid: str,
+        revision: int,
+        worker_id: str,
+        environment_id: str,
+        state: Optional[DocumentState] = None,
+        *,
+        error: str = "",
+    ) -> ValidationReport:
+        expected = self.connection.execute(
+            """
+            SELECT definition_hash, result_hash, environment_id
+            FROM revisions WHERE document_uid = ? AND revision = ?
+            """,
+            (document_uid, int(revision)),
+        ).fetchone()
+        if expected is None:
+            raise UnknownDocumentError(f"{document_uid}@{revision}")
+        definition_hash = state.definition_hash if state is not None else ""
+        result_hash = state.result_hash if state is not None else ""
+        environment_matches = environment_id == expected["environment_id"]
+        definition_matches = bool(state) and definition_hash == expected["definition_hash"]
+        result_matches = bool(state) and result_hash == expected["result_hash"]
+        valid = bool(
+            not error
+            and environment_matches
+            and definition_matches
+            and result_matches
+        )
+        self.connection.execute(
+            """
+            INSERT INTO validation_results (
+                document_uid, revision, worker_id, environment_id,
+                definition_hash, result_hash, environment_matches,
+                definition_matches, result_matches, valid, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(document_uid, revision) DO UPDATE SET
+                worker_id = excluded.worker_id,
+                environment_id = excluded.environment_id,
+                definition_hash = excluded.definition_hash,
+                result_hash = excluded.result_hash,
+                environment_matches = excluded.environment_matches,
+                definition_matches = excluded.definition_matches,
+                result_matches = excluded.result_matches,
+                valid = excluded.valid,
+                error = excluded.error,
+                validated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                document_uid,
+                int(revision),
+                worker_id,
+                environment_id,
+                definition_hash,
+                result_hash,
+                int(environment_matches),
+                int(definition_matches),
+                int(result_matches),
+                int(valid),
+                error,
+            ),
+        )
+        return self.validation_report(document_uid, revision)
+
+    def validation_report(self, document_uid: str, revision: int) -> ValidationReport:
+        row = self.connection.execute(
+            """
+            SELECT * FROM validation_results
+            WHERE document_uid = ? AND revision = ?
+            """,
+            (document_uid, int(revision)),
+        ).fetchone()
+        if row is None:
+            raise UnknownDocumentError(f"no validation for {document_uid}@{revision}")
+        return ValidationReport(
+            document_uid=row["document_uid"],
+            revision=int(row["revision"]),
+            worker_id=row["worker_id"],
+            environment_id=row["environment_id"],
+            definition_hash=row["definition_hash"],
+            result_hash=row["result_hash"],
+            environment_matches=bool(row["environment_matches"]),
+            definition_matches=bool(row["definition_matches"]),
+            result_matches=bool(row["result_matches"]),
+            valid=bool(row["valid"]),
+            error=row["error"],
+            validated_at=row["validated_at"],
+        )
 
     @staticmethod
     def _record(row, *, duplicate: bool = False) -> RevisionRecord:

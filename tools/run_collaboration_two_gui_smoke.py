@@ -122,6 +122,47 @@ def main():
             wait_for(Path(configs["sender"]["result"]))
             wait_for(Path(configs["receiver"]["result"]))
 
+            validator = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "freecad_collaboration.validator",
+                    "--server",
+                    server_url,
+                    "--worker-id",
+                    "two-gui-smoke-validator",
+                    "--environment",
+                    ENVIRONMENT_ID,
+                    "--once",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                startupinfo=hidden_startupinfo(),
+            )
+            if validator.returncode:
+                validation_details = ""
+                try:
+                    with urlopen(
+                        f"{server_url}/documents/{DOCUMENT_UID}/revisions/1/validation",
+                        timeout=5,
+                    ) as response:
+                        validation_details = response.read().decode("utf-8")
+                except Exception as exc:
+                    validation_details = f"unable to read validation result: {exc}"
+                raise RuntimeError(
+                    f"headless validator failed:\n{validator.stdout}\n{validator.stderr}\n"
+                    f"{validation_details}"
+                )
+            with urlopen(
+                f"{server_url}/documents/{DOCUMENT_UID}/revisions/1/validation",
+                timeout=5,
+            ) as response:
+                validation = json.loads(response.read().decode("utf-8"))
+            if not validation["valid"]:
+                raise AssertionError(validation)
+
             for peer in peers:
                 output, _ = peer.communicate(timeout=15)
                 if peer.returncode:
@@ -138,7 +179,7 @@ def main():
                 raise AssertionError("GUI peers have different definition hashes")
             if results["sender"]["result_hash"] != results["receiver"]["result_hash"]:
                 raise AssertionError("GUI peers have different result hashes")
-            print(json.dumps(results, indent=2))
+            print(json.dumps({"peers": results, "validation": validation}, indent=2))
         finally:
             for peer in peers:
                 if peer.poll() is None:

@@ -153,6 +153,18 @@ class RevisionStoreTests(unittest.TestCase):
             accepted = store.append(packet, document_state(source))
             self.assertEqual(accepted.revision, 1)
             self.assertEqual(store.head_revision(document_uid), 1)
+            jobs = store.pending_validation_jobs()
+            self.assertEqual([(job.document_uid, job.revision) for job in jobs], [(document_uid, 1)])
+
+            validation = store.report_validation(
+                document_uid,
+                1,
+                "headless-worker",
+                "test-env",
+                document_state(source),
+            )
+            self.assertTrue(validation.valid)
+            self.assertEqual(store.pending_validation_jobs(), [])
 
             duplicate = store.append(packet, document_state(source))
             self.assertTrue(duplicate.duplicate)

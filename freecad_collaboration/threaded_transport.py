@@ -104,10 +104,10 @@ class ThreadedRelayTransport:
     def report_state(self, revision, state):
         return self._submit_coroutine(self.client.report_state(revision, state))
 
-    def request_revisions(self, after):
+    def request_revisions(self, after, *, message_type="catch_up"):
         async def fetch():
             records = await self.client.revisions_after(after)
-            self.incoming.put({"type": "catch_up", "records": records})
+            self.incoming.put({"type": message_type, "records": records})
 
         return self._submit_coroutine(fetch())
 

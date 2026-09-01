@@ -25,6 +25,8 @@ from .revision_store import (
     RevisionStore,
     StaleRevisionError,
     UnknownDocumentError,
+    ValidationJob,
+    ValidationReport,
 )
 from .state import DocumentState, StateHashError, document_state
 
@@ -46,6 +48,8 @@ __all__ = [
     "TransactionPacket",
     "TransactionRecorder",
     "UnknownDocumentError",
+    "ValidationJob",
+    "ValidationReport",
     "apply_packet",
     "bootstrap_document",
     "document_state",

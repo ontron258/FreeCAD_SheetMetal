@@ -119,6 +119,42 @@ async def revisions(request):
     )
 
 
+async def validation_jobs(request):
+    limit = int(request.query.get("limit", "10"))
+    jobs = request.app[STORE_KEY].pending_validation_jobs(limit)
+    return web.json_response([asdict(job) for job in jobs])
+
+
+async def get_validation(request):
+    try:
+        report = request.app[STORE_KEY].validation_report(
+            request.match_info["document_uid"], int(request.match_info["revision"])
+        )
+    except UnknownDocumentError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    return web.json_response(asdict(report))
+
+
+async def post_validation(request):
+    message = await request.json()
+    state_data = message.get("state")
+    state = DocumentState.from_dict(state_data) if state_data is not None else None
+    try:
+        report = request.app[STORE_KEY].report_validation(
+            request.match_info["document_uid"],
+            int(request.match_info["revision"]),
+            message["worker_id"],
+            message.get("environment_id", ""),
+            state,
+            error=message.get("error", ""),
+        )
+    except UnknownDocumentError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    payload = {"type": "validation_state", **asdict(report)}
+    await _broadcast(request.app, report.document_uid, payload)
+    return web.json_response(payload)
+
+
 async def _handle_submit(request, socket, message, client_id):
     packet = TransactionPacket.from_dict(message["packet"])
     route_document_uid = request.match_info["document_uid"]
@@ -190,6 +226,14 @@ async def websocket(request):
     await socket.prepare(request)
     clients = request.app[CLIENTS_KEY].setdefault(document_uid, set())
     clients.add(socket)
+    validation = None
+    if head.revision:
+        try:
+            validation = asdict(
+                request.app[STORE_KEY].validation_report(document_uid, head.revision)
+            )
+        except UnknownDocumentError:
+            pass
     await socket.send_json(
         {
             "type": "hello",
@@ -200,6 +244,7 @@ async def websocket(request):
             "definition_hash": head.definition_hash,
             "result_hash": head.result_hash,
             "locks": [asdict(lock) for lock in request.app[STORE_KEY].list_locks(document_uid)],
+            "validation": validation,
         }
     )
 
@@ -247,6 +292,13 @@ def create_app(store: RevisionStore) -> web.Application:
     application.router.add_put("/documents/{document_uid}/checkpoint", put_checkpoint)
     application.router.add_get("/documents/{document_uid}/checkpoint", get_checkpoint)
     application.router.add_get("/documents/{document_uid}/revisions", revisions)
+    application.router.add_get("/validation/jobs", validation_jobs)
+    application.router.add_get(
+        "/documents/{document_uid}/revisions/{revision}/validation", get_validation
+    )
+    application.router.add_post(
+        "/documents/{document_uid}/revisions/{revision}/validation", post_validation
+    )
     application.router.add_get("/documents/{document_uid}/ws", websocket)
     return application
 

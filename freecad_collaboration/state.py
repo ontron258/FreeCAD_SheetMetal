@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
+import math
 
 from .identity import IdentityError, get_object_uid
 from .persistence import persistence_digest
@@ -85,6 +87,117 @@ def _is_result_property(property_name: str, property_type: str) -> bool:
     return property_name in RESULT_PROPERTY_NAMES or property_type in RESULT_PROPERTY_TYPES
 
 
+def _number(value):
+    value = float(value)
+    if not math.isfinite(value):
+        return str(value)
+    if abs(value) < 1e-12:
+        value = 0.0
+    return format(value, ".12g")
+
+
+def _vector(value):
+    return [_number(value.x), _number(value.y), _number(value.z)]
+
+
+def _bounds(shape):
+    bounds = shape.BoundBox
+    return [
+        _number(bounds.XMin),
+        _number(bounds.YMin),
+        _number(bounds.ZMin),
+        _number(bounds.XMax),
+        _number(bounds.YMax),
+        _number(bounds.ZMax),
+    ]
+
+
+def _sorted_signatures(values):
+    return sorted(values, key=lambda value: json.dumps(value, sort_keys=True))
+
+
+def _edge_signature(edge):
+    signature = {
+        "curve": type(edge.Curve).__name__,
+        "orientation": str(edge.Orientation),
+        "length": _number(edge.Length),
+        "bounds": _bounds(edge),
+    }
+    first = float(edge.FirstParameter)
+    last = float(edge.LastParameter)
+    if math.isfinite(first) and math.isfinite(last):
+        signature["samples"] = [
+            _vector(edge.valueAt(first + (last - first) * index / 8.0))
+            for index in range(9)
+        ]
+    return signature
+
+
+def _face_signature(face):
+    signature = {
+        "surface": type(face.Surface).__name__,
+        "orientation": str(face.Orientation),
+        "area": _number(face.Area),
+        "center": _vector(face.CenterOfMass),
+        "bounds": _bounds(face),
+    }
+    u_first, u_last, v_first, v_last = map(float, face.ParameterRange)
+    if all(math.isfinite(value) for value in (u_first, u_last, v_first, v_last)):
+        signature["samples"] = [
+            _vector(
+                face.valueAt(
+                    u_first + (u_last - u_first) * u_index / 2.0,
+                    v_first + (v_last - v_first) * v_index / 2.0,
+                )
+            )
+            for u_index in range(3)
+            for v_index in range(3)
+        ]
+    return signature
+
+
+def _shape_signature(shape):
+    if shape.isNull():
+        return {"null": True}
+    signature = {
+        "shape_type": str(shape.ShapeType),
+        "orientation": str(shape.Orientation),
+        "bounds": _bounds(shape),
+        "area": _number(shape.Area),
+        "volume": _number(shape.Volume),
+        "length": _number(shape.Length),
+        "center": _vector(shape.CenterOfMass),
+        "counts": {
+            "solids": len(shape.Solids),
+            "shells": len(shape.Shells),
+            "faces": len(shape.Faces),
+            "wires": len(shape.Wires),
+            "edges": len(shape.Edges),
+            "vertices": len(shape.Vertexes),
+        },
+        "vertices": sorted(_vector(vertex.Point) for vertex in shape.Vertexes),
+        "edges": _sorted_signatures(_edge_signature(edge) for edge in shape.Edges),
+        "faces": _sorted_signatures(_face_signature(face) for face in shape.Faces),
+    }
+    return signature
+
+
+def _result_property_digest(obj, property_name: str, property_type: str) -> str:
+    """Hash computed geometry without native persistence-container noise."""
+
+    value = getattr(obj, property_name)
+    shapes = value if isinstance(value, (list, tuple)) else [value]
+    if shapes and all(hasattr(shape, "ShapeType") for shape in shapes):
+        canonical = json.dumps(
+            [_shape_signature(shape) for shape in shapes],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+    payload = obj.dumpPropertyContent(property_name, Compression=9)
+    return persistence_digest(payload)
+
+
 def document_state(document) -> DocumentState:
     """Return deterministic hashes for the current persistent object graph.
 
@@ -117,8 +230,13 @@ def document_state(document) -> DocumentState:
                 continue
             property_type = obj.getTypeIdOfProperty(property_name)
             try:
-                payload = obj.dumpPropertyContent(property_name, Compression=9)
-                payload_hash = persistence_digest(payload)
+                if _is_result_property(property_name, property_type):
+                    payload_hash = _result_property_digest(
+                        obj, property_name, property_type
+                    )
+                else:
+                    payload = obj.dumpPropertyContent(property_name, Compression=9)
+                    payload_hash = persistence_digest(payload)
             except Exception as exc:
                 raise StateHashError(
                     f"cannot hash {obj.Name}.{property_name}: {exc}"

@@ -254,7 +254,10 @@ requires its independently reconstructed revision to match.
 The current suite contains 33 tests. A manual persistent client launcher for
 local two-window trials is available at `tools/live_collaboration_client.py`;
 it reads the documented `FREECAD_COLLAB_LIVE_*` environment variables and is
-passed to `FreeCAD.exe` as a positional startup script.
+passed to `FreeCAD.exe` as a positional startup script. The launcher preloads
+the model's installed SheetMetal Python feature proxies before opening or
+restoring the FCStd checkpoint, satisfying FreeCAD's safe-unpickling policy on
+both the sharing and joining clients.
 
 ## Next slice
 

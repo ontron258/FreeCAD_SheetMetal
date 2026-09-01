@@ -11,10 +11,36 @@ import os
 from pathlib import Path
 import sys
 import traceback
+import importlib
 
 import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtWidgets
+
+
+# Python feature proxies must already be importable when FreeCAD restores an
+# FCStd checkpoint.  Its safe-unpickling policy deliberately refuses to import
+# an unknown module merely because a document names it.  Activating the
+# workbench (and explicitly importing the proxies used by the collaboration
+# fixture) establishes the trusted, installed code before opening either copy.
+MODEL_PROXY_MODULES = (
+    "SheetMetalBaseCmd",
+    "SheetMetalShapedFlangeCmd",
+    "SheetMetalBoltConnectionCmd",
+    "SheetMetalConnectedPatternCmd",
+    "SheetMetalCmd",
+)
+
+
+def _preload_model_proxies():
+    try:
+        Gui.activateWorkbench("SMWorkbench")
+    except Exception:
+        # Direct imports below are authoritative for persistence restore; the
+        # workbench activation is only useful for its wider command setup.
+        pass
+    for module_name in MODEL_PROXY_MODULES:
+        importlib.import_module(module_name)
 
 def _required(name):
     value = os.environ.get(name, "").strip()
@@ -33,6 +59,8 @@ def start_client():
     server = _required("FREECAD_COLLAB_LIVE_SERVER")
     environment_id = _required("FREECAD_COLLAB_LIVE_ENVIRONMENT")
     document_uid = _required("FREECAD_COLLAB_LIVE_DOCUMENT_UID")
+
+    _preload_model_proxies()
 
     if role == "source":
         source_path = _required("FREECAD_COLLAB_LIVE_SOURCE")

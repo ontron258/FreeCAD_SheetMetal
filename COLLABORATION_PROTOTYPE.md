@@ -19,12 +19,18 @@ packets must remain the fallback for unknown workbenches.
 - Observes FreeCAD transaction open, commit, and abort callbacks.
 - Records object creation/deletion, persistent property changes, and dynamic
   property addition/removal.
+- Collapses FreeCAD's standard `Edit Object.Property` transactions to the one
+  editable input property. Derived shapes, caches, pattern children, and other
+  recompute output are regenerated independently by each client instead of
+  being serialized as hundreds of redundant operations.
 - Uses FreeCAD's native `dumpContent`, `dumpPropertyContent`, `restoreContent`,
   and `restorePropertyContent` APIs for workbench-neutral payloads.
 - Encodes native persistence payloads as Base64 so packets can be stored as
   JSON during the prototype.
 - Replays packets inside one FreeCAD transaction and can suppress a target
   recorder to prevent network echo.
+- Treats protected generated properties and already-removed dependent objects
+  as local recompute results during replay.
 - Computes separate canonical hashes for the parametric definition and the
   generated geometry. Definition payloads exclude native ZIP timestamps;
   Part shapes use sorted topology, mass properties, bounds, and curve/surface
@@ -182,6 +188,10 @@ identity.
   workbench coverage.
 - Geometry and Sketcher list elements do not yet receive collaboration-level
   identifiers.
+- Compact property-edit recording currently recognizes FreeCAD's standard
+  `Edit Object.Property` transaction name. Other commands use the generic
+  filtered transaction fallback until operation intent is represented
+  explicitly by command/workbench integrations.
 - Labels and known generated drawing names are synchronized by packets but are
   excluded from canonical state hashes because FreeCAD/Python features may
   renumber them during an otherwise equivalent save/reopen.
@@ -225,7 +235,7 @@ has one upload the checkpoint, has the other restore it, synchronizes an edit,
 compares both client hashes, launches a separate headless validator, and
 requires its independently reconstructed revision to match.
 
-The current suite contains 28 tests. A manual persistent client launcher for
+The current suite contains 29 tests. A manual persistent client launcher for
 local two-window trials is available at `tools/live_collaboration_client.py`;
 it reads the documented `FREECAD_COLLAB_LIVE_*` environment variables and is
 passed to `FreeCAD.exe` as a positional startup script.

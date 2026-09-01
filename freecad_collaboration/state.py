@@ -243,6 +243,24 @@ def _definition_property_digest(obj, property_name: str, property_type: str) -> 
             }
             for geometry in value
         ]
+    elif property_type == "Sketcher::PropertyConstraintList":
+        canonical = [
+            {
+                "type": constraint.Type,
+                "name": constraint.Name,
+                "driving": bool(constraint.Driving),
+                "active": bool(constraint.IsActive),
+                "virtual": bool(constraint.InVirtualSpace),
+                "first": int(constraint.First),
+                "first_pos": int(constraint.FirstPos),
+                "second": int(constraint.Second),
+                "second_pos": int(constraint.SecondPos),
+                "third": int(constraint.Third),
+                "third_pos": int(constraint.ThirdPos),
+                "value": _number(constraint.Value),
+            }
+            for constraint in value
+        ]
     elif property_type.startswith("App::Property") and hasattr(value, "Value"):
         canonical = {
             "value": _number(value.Value),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import re
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import FreeCAD as App
@@ -12,9 +13,49 @@ from .identity import ensure_object_uid, get_object_uid
 from .links import link_kind, serialize_link_property
 from .packet import Operation, TransactionPacket
 from .persistence import dump_object, try_dump_property
+from .state import RESULT_PROPERTY_NAMES, RESULT_PROPERTY_TYPES
 
 
 PropertyKey = Tuple[str, str]
+EDIT_PROPERTY_TRANSACTION = re.compile(r"^Edit (.+)\.([^.]+)$")
+
+
+def _property_status(obj, property_name: str) -> Set[str]:
+    try:
+        return {str(value) for value in obj.getPropertyStatus(property_name)}
+    except Exception:
+        return set()
+
+
+def _is_recomputed_or_protected_property(obj, property_name: str) -> bool:
+    """Return whether a changed property should normally be recomputed locally."""
+
+    property_type = obj.getTypeIdOfProperty(property_name)
+    status = _property_status(obj, property_name)
+    return (
+        property_name.startswith("_")
+        or property_name.startswith("Cache_")
+        or property_name == "FullyConstrained"
+        or property_name in RESULT_PROPERTY_NAMES
+        or property_type in RESULT_PROPERTY_TYPES
+        or bool(status & {"ReadOnly", "Output", "Immutable", "NoModify"})
+    )
+
+
+def _edited_property_key(state: "_TransactionState") -> Optional[PropertyKey]:
+    """Resolve FreeCAD's standard property-editor transaction name."""
+
+    match = EDIT_PROPERTY_TRANSACTION.match(state.name)
+    if not match:
+        return None
+    object_name, property_name = match.groups()
+    matches = [
+        key
+        for key, obj in state.changed.items()
+        if key[1] == property_name
+        and (obj.Name == object_name or obj.Label == object_name)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 @dataclass
@@ -194,6 +235,7 @@ class TransactionRecorder:
         state = self._active
         self._active = None
         operations: List[Operation] = []
+        edited_property_key = _edited_property_key(state)
 
         # Create all objects before restoring their contents during replay so
         # same-document links can resolve even when they point forward.
@@ -232,9 +274,17 @@ class TransactionRecorder:
         deleted_uids = set(state.deleted)
         for key, obj in state.changed.items():
             uid, property_name = key
+            if edited_property_key is not None and key != edited_property_key:
+                continue
             if uid in deleted_uids or key in removed_keys:
                 continue
             if property_name not in obj.PropertiesList:
+                continue
+            if (
+                edited_property_key is None
+                and key not in state.dynamic_added
+                and _is_recomputed_or_protected_property(obj, property_name)
+            ):
                 continue
             prop_type, group, documentation = state.dynamic_added.get(key, ("", "", ""))
             if prop_type:
@@ -267,8 +317,9 @@ class TransactionRecorder:
                 )
             )
 
-        operations.extend(state.dynamic_removed.values())
-        operations.extend(state.deleted.values())
+        if edited_property_key is None:
+            operations.extend(state.dynamic_removed.values())
+            operations.extend(state.deleted.values())
         if not operations:
             return
 

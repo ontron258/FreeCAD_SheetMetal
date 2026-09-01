@@ -89,6 +89,29 @@ class CollaborationTransactionTests(unittest.TestCase):
         self.assertEqual(target.Box.Label, "Shared Box")
         self.assertEqual(target_recorder.packets, [])
 
+    def test_property_editor_transaction_omits_recomputed_outputs(self):
+        source = self.new_document("PropertyEditorSource")
+        feature = source.addObject("Part::FeaturePython", "Parameters")
+        feature.addProperty("App::PropertyInteger", "Count", "Inputs")
+        feature.addProperty("App::PropertyInteger", "Derived", "Outputs")
+        feature.setEditorMode("Derived", 1)
+        bootstrap_document(source)
+        recorder = self.recorder(source)
+
+        source.openTransaction("Edit Parameters.Count")
+        feature.Count = 4
+        feature.setEditorMode("Derived", 0)
+        feature.Derived = 8
+        feature.setEditorMode("Derived", 1)
+        source.commitTransaction()
+
+        self.assertEqual(len(recorder.packets), 1)
+        operations = recorder.packets[0].operations
+        self.assertEqual(
+            [(operation.object_name, operation.property_name) for operation in operations],
+            [("Parameters", "Count")],
+        )
+
     def test_created_objects_and_forward_link_replay(self):
         source = self.new_document("CreateSource")
         bootstrap_document(source)
@@ -131,6 +154,9 @@ class CollaborationTransactionTests(unittest.TestCase):
         source.removeObject(doomed.Name)
         source.commitTransaction()
 
+        # The peer may already have removed a generated/dependent object while
+        # applying an earlier operation from the same packet.
+        target.removeObject("Doomed")
         apply_packet(target, recorder.packets[0], validate_document_uid=False)
 
         self.assertNotIn("Temporary", target.Feature.PropertiesList)

@@ -16,6 +16,7 @@ from SheetMetalMaterial import (
     CONFIGURATION_VARIABLE,
     materialConfiguration,
     standardSheetMetalParameters,
+    updatePartWeight,
 )
 from SheetMetalShapedFlangeCmd import (
     SMShapedFlange,
@@ -56,6 +57,75 @@ class TestMaterialDefaults(unittest.TestCase):
         self.assertEqual(hrs["bend_radius"], hrs["thickness"])
         self.assertAlmostEqual(hrs["k_factor"], 0.44)
         self.assertAlmostEqual(stainless["k_factor"], 0.45)
+        self.assertAlmostEqual(hrs["density"], 7850.0)
+        self.assertAlmostEqual(stainless["density"], 8000.0)
+
+    def test_part_weight_uses_catalog_density_and_current_tip_volume(self):
+        doc = App.newDocument("SheetMetalPartWeight")
+        try:
+            part = createSheetMetalPart(doc)
+            solid = doc.addObject("Part::Feature", "CurrentSolid")
+            solid.Shape = Part.makeBox(10.0, 20.0, 2.0)
+            part.addObject(solid)
+            part.Tip = solid.Name
+            doc.recompute()
+
+            self.assertEqual(
+                part.getTypeIdOfProperty("Density"), "App::PropertyDensity"
+            )
+            self.assertEqual(
+                part.getTypeIdOfProperty("Weight"), "App::PropertyMass"
+            )
+            self.assertAlmostEqual(
+                part.Density.getValueAs("kg/m^3"), 7850.0
+            )
+            self.assertAlmostEqual(
+                part.Weight.getValueAs("kg"), 400.0 * 7.85e-6
+            )
+
+            solid.Shape = Part.makeBox(10.0, 20.0, 1.0)
+            doc.recompute()
+            self.assertAlmostEqual(
+                part.Weight.getValueAs("kg"), 200.0 * 7.85e-6
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_material_upgrade_changes_density_and_weight(self):
+        doc = App.newDocument("SheetMetalMaterialWeightUpgrade")
+        try:
+            part = createSheetMetalPart(doc)
+            solid = doc.addObject("Part::Feature", "CurrentSolid")
+            solid.Shape = Part.makeBox(10.0, 10.0, 10.0)
+            part.addObject(solid)
+            part.Tip = solid.Name
+            doc.recompute()
+
+            materialConfiguration(doc).MaterialUpgrade = "Stainless Steel"
+            doc.recompute()
+
+            self.assertAlmostEqual(
+                part.Density.getValueAs("kg/m^3"), 8000.0
+            )
+            self.assertAlmostEqual(part.Weight.getValueAs("kg"), 0.008)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_manual_density_controls_weight(self):
+        doc = App.newDocument("SheetMetalManualWeight")
+        try:
+            part = doc.addObject("App::Part", "SheetMetalPart")
+            addSheetMetalPartProperties(part)
+            solid = doc.addObject("Part::Feature", "CurrentSolid")
+            solid.Shape = Part.makeBox(10.0, 10.0, 10.0)
+            part.addObject(solid)
+            part.Tip = solid.Name
+            part.Density = "2700 kg/m^3"
+
+            self.assertAlmostEqual(updatePartWeight(part), 0.0027)
+            self.assertAlmostEqual(part.Weight.getValueAs("kg"), 0.0027)
+        finally:
+            App.closeDocument(doc.Name)
 
     def test_product_upgrade_only_changes_opted_in_parts(self):
         doc = App.newDocument("SheetMetalMaterialUpgrade")
@@ -219,6 +289,10 @@ class TestMaterialDefaults(unittest.TestCase):
                     reopened_part.Thickness.Value / 25.4, 0.0625, places=7
                 )
                 self.assertAlmostEqual(float(reopened_part.KFactor), 0.45)
+                self.assertAlmostEqual(
+                    reopened_part.Density.getValueAs("kg/m^3"), 8000.0
+                )
+                self.assertIn("Weight", reopened_part.PropertiesList)
             finally:
                 App.closeDocument(reopened.Name)
 
@@ -241,6 +315,10 @@ class TestMaterialDefaults(unittest.TestCase):
                 self.assertFalse(reopened_part.UseMaterialCatalog)
                 self.assertEqual(reopened_part.EffectiveMaterial, "Manual")
                 self.assertAlmostEqual(reopened_part.Thickness.Value, 3.175)
+                self.assertAlmostEqual(
+                    reopened_part.Density.getValueAs("kg/m^3"), 7850.0
+                )
+                self.assertIn("Weight", reopened_part.PropertiesList)
             finally:
                 App.closeDocument(reopened.Name)
 
@@ -335,6 +413,10 @@ class TestMaterialDefaults(unittest.TestCase):
             self.assertAlmostEqual(
                 base_bend.Radius.Value, part.DefaultBendRadius.Value
             )
+            self.assertAlmostEqual(
+                part.Weight.getValueAs("kg"),
+                base_bend.Shape.Volume * part.Density.Value,
+            )
         finally:
             App.closeDocument(doc.Name)
 
@@ -364,6 +446,10 @@ class TestMaterialDefaults(unittest.TestCase):
                 base_bend.Thickness.Value, part.Thickness.Value
             )
             self.assertTrue(base_bend.Shape.isValid())
+            self.assertAlmostEqual(
+                part.Weight.getValueAs("kg"),
+                base_bend.Shape.Volume * part.Density.Value,
+            )
         finally:
             App.closeDocument(doc.Name)
 

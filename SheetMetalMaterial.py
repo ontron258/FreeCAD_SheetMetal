@@ -69,6 +69,13 @@ _K_FACTORS = {
     "Corten Steel": 0.44,
 }
 
+_DENSITIES_KG_M3 = {
+    "Hot Rolled Steel": 7850.0,
+    "Galvanized Steel": 7850.0,
+    "Stainless Steel": 8000.0,
+    "Corten Steel": 7850.0,
+}
+
 _MATERIAL_PROPERTY_NAMES = (
     "UseMaterialCatalog",
     "BaseMaterial",
@@ -77,6 +84,7 @@ _MATERIAL_PROPERTY_NAMES = (
     "EffectiveMaterial",
     "UseStandardBendRadius",
     "UseStandardKFactor",
+    "Density",
 )
 
 
@@ -103,6 +111,7 @@ def standardSheetMetalParameters(material, sheet_size):
         "thickness": thickness,
         "bend_radius": thickness,
         "k_factor": _K_FACTORS[material],
+        "density": _DENSITIES_KG_M3[material],
     }
 
 
@@ -268,7 +277,32 @@ def addMaterialProperties(part):
         False,
         "Material",
     )
+    if "Density" not in part.PropertiesList:
+        part.addProperty(
+            "App::PropertyDensity",
+            "Density",
+            "Material",
+            translate(
+                "App::Property",
+                "Bulk material density; catalog controlled when material defaults are enabled",
+            ),
+        )
+        part.Density = "{} kg/m^3".format(
+            _DENSITIES_KG_M3["Hot Rolled Steel"]
+        )
+    if "Weight" not in part.PropertiesList:
+        part.addProperty(
+            "App::PropertyMass",
+            "Weight",
+            "Drawing",
+            translate(
+                "App::Property",
+                "Calculated part mass from material density and the current sheet-metal solid",
+            ),
+        )
+    part.setEditorMode("Weight", 1)
     _update_editor_modes(part)
+    updatePartWeight(part)
 
 
 def _effective_material(part, create_configuration=False):
@@ -299,6 +333,58 @@ def _update_editor_modes(part):
         part.setEditorMode(
             "KFactor", 1 if catalog and part.UseStandardKFactor else 0
         )
+    if "Density" in part.PropertiesList:
+        part.setEditorMode("Density", 1 if catalog else 0)
+
+
+def _shape_from_part_tip(part):
+    """Return the current formed solid used to calculate a part's weight."""
+    tip_name = str(getattr(part, "Tip", "")).strip()
+    if tip_name:
+        tip = part.Document.getObject(tip_name)
+        if tip is not None and hasattr(tip, "Shape"):
+            return tip.Shape
+
+    # Make Base Wall may live in a PartDesign Body whose native Tip remains the
+    # best final-feature reference, even in older documents with no part Tip.
+    for child in reversed(list(getattr(part, "Group", []))):
+        if child.TypeId != "PartDesign::Body":
+            continue
+        body_tip = getattr(child, "Tip", None)
+        if body_tip is not None and hasattr(body_tip, "Shape"):
+            return body_tip.Shape
+
+    # Legacy Make Base Wall parts predate the string Tip.  Limit this fallback
+    # to BaseBend-shaped objects so Unfold or presentation geometry can never
+    # become the source of a formed-part weight.
+    base_bends = []
+    for candidate in part.Document.Objects:
+        if candidate is part or findSheetMetalPart(candidate) is not part:
+            continue
+        if not all(
+            name in candidate.PropertiesList
+            for name in ("BendSketch", "BendSide", "Thickness", "Radius")
+        ):
+            continue
+        if hasattr(candidate, "Shape"):
+            base_bends.append(candidate)
+    return base_bends[-1].Shape if base_bends else None
+
+
+def updatePartWeight(part):
+    """Update the unit-aware drawing weight for one Sheet Metal Part."""
+    if not _is_sheet_metal_part(part) or not all(
+        name in part.PropertiesList for name in ("Density", "Weight")
+    ):
+        return 0.0
+    shape = _shape_from_part_tip(part)
+    volume = 0.0
+    if shape is not None and not shape.isNull():
+        volume = max(0.0, float(shape.Volume))
+    mass_kg = volume * float(part.Density.Value)
+    if abs(float(part.Weight.Value) - mass_kg) > 1.0e-12:
+        part.Weight = mass_kg
+    return mass_kg
 
 
 def applyMaterialDefaults(part, create_configuration=False):
@@ -312,6 +398,7 @@ def applyMaterialDefaults(part, create_configuration=False):
         if part.EffectiveMaterial != "Manual":
             part.EffectiveMaterial = "Manual"
         _update_editor_modes(part)
+        updatePartWeight(part)
         return None
     material = _effective_material(part, create_configuration)
     defaults = standardSheetMetalParameters(material, str(part.SheetSize))
@@ -329,7 +416,11 @@ def applyMaterialDefaults(part, create_configuration=False):
         and abs(float(part.KFactor) - defaults["k_factor"]) > 1.0e-12
     ):
         part.KFactor = defaults["k_factor"]
+    density = defaults["density"]
+    if abs(part.Density.getValueAs("kg/m^3") - density) > 1.0e-9:
+        part.Density = "{} kg/m^3".format(density)
     _update_editor_modes(part)
+    updatePartWeight(part)
     return defaults
 
 
@@ -347,13 +438,17 @@ def configureNewPart(part):
 
 def materialPropertyValues(part):
     """Capture material controls while upgrading an experimental container."""
-    return {
-        name: str(getattr(part, name))
-        if name in ("BaseMaterial", "SheetSize", "EffectiveMaterial")
-        else bool(getattr(part, name))
-        for name in _MATERIAL_PROPERTY_NAMES
-        if name in part.PropertiesList
-    }
+    values = {}
+    for name in _MATERIAL_PROPERTY_NAMES:
+        if name not in part.PropertiesList:
+            continue
+        if name in ("BaseMaterial", "SheetSize", "EffectiveMaterial"):
+            values[name] = str(getattr(part, name))
+        elif name == "Density":
+            values[name] = part.Density.getValueAs("kg/m^3")
+        else:
+            values[name] = bool(getattr(part, name))
+    return values
 
 
 def restoreMaterialPropertyValues(part, values):
@@ -361,7 +456,10 @@ def restoreMaterialPropertyValues(part, values):
     use_catalog = bool(values.get("UseMaterialCatalog", False))
     for name, value in values.items():
         if name != "UseMaterialCatalog" and name in part.PropertiesList:
-            setattr(part, name, value)
+            if name == "Density":
+                part.Density = "{} kg/m^3".format(value)
+            else:
+                setattr(part, name, value)
     part.UseMaterialCatalog = use_catalog
     applyMaterialDefaults(part, use_catalog and part.FollowMaterialUpgrade)
 
@@ -401,6 +499,14 @@ class _MaterialDefaultsObserver:
                     prop == "FollowMaterialUpgrade" and obj.FollowMaterialUpgrade,
                 )
                 return
+            if _is_sheet_metal_part(obj) and prop in ("Density", "Tip"):
+                updatePartWeight(obj)
+                return
+            if prop == "Shape":
+                part = findSheetMetalPart(obj)
+                if part is not None and part is not obj:
+                    updatePartWeight(part)
+                return
             if (
                 prop == "MaterialUpgrade"
                 and hasattr(obj, "SheetMetalConfigurationType")
@@ -422,6 +528,17 @@ class _MaterialDefaultsObserver:
         try:
             self.updating = True
             upgradeDocumentMaterialProperties(doc)
+        finally:
+            self.updating = False
+
+    def slotRecomputedDocument(self, doc):
+        if self.updating:
+            return
+        try:
+            self.updating = True
+            for obj in doc.Objects:
+                if _is_sheet_metal_part(obj):
+                    updatePartWeight(obj)
         finally:
             self.updating = False
 

@@ -62,8 +62,10 @@ object names; saved FreeCAD documents depend on them.
 ### Material defaults and product upgrades
 
 `SheetMetalMaterial.py` owns the material catalog and part-level material
-policy. New sheet-metal parts use catalog-driven thickness, bend radius, and
-K-factor values. Existing saved parts migrate conservatively to manual mode.
+policy. New sheet-metal parts use catalog-driven thickness, bend radius,
+K-factor, and density values. Existing saved parts migrate conservatively to
+manual mode. Each Sheet Metal Part exposes a read-only, unit-aware `Weight`
+property calculated from its current formed Tip volume for drawings and BOMs.
 
 The document-level `SheetMetalConfiguration` is an `App::VarSet`; its
 `MaterialUpgrade` property is the predefined product configuration variable.

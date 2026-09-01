@@ -215,6 +215,44 @@ class RevisionStoreTests(unittest.TestCase):
             )
             self.assertFalse(divergent.definition_matches)
 
+    def test_provisional_revision_is_finalized_by_headless_validation(self):
+        source = self.new_document("ProvisionalSource")
+        box = source.addObject("Part::Box", "Box")
+        bootstrap_document(source)
+        source.recompute()
+        recorder = self.recorder(source)
+        document_uid = str(source.Uid)
+
+        with RevisionStore(self.database_path) as store:
+            store.register_document(
+                document_uid,
+                source.Label,
+                document_state(source),
+                environment_id="test-env",
+            )
+            source.openTransaction("Resize provisionally")
+            box.Length = 88
+            source.recompute()
+            source.commitTransaction()
+
+            accepted = store.append(recorder.packets[0])
+            self.assertEqual(accepted.definition_hash, "")
+            self.assertEqual(accepted.result_hash, "")
+            self.assertEqual(store.document_head(document_uid).definition_hash, "")
+
+            expected = document_state(source)
+            validation = store.report_validation(
+                document_uid,
+                1,
+                "headless-worker",
+                "test-env",
+                expected,
+            )
+            self.assertTrue(validation.valid)
+            finalized = store.document_head(document_uid)
+            self.assertEqual(finalized.definition_hash, expected.definition_hash)
+            self.assertEqual(finalized.result_hash, expected.result_hash)
+
     def test_stale_and_wrong_environment_packets_are_rejected(self):
         source = self.new_document("ConflictSource")
         box = source.addObject("Part::Box", "Box")

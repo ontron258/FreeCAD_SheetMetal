@@ -19,6 +19,13 @@ from .state import RESULT_PROPERTY_NAMES, RESULT_PROPERTY_TYPES
 PropertyKey = Tuple[str, str]
 EDIT_PROPERTY_TRANSACTION = re.compile(r"^Edit (.+)\.([^.]+)$")
 
+# These are follow-up transactions emitted by FreeCAD after the user-owned
+# sketch edit has already committed.  They contain solver and dependency-graph
+# output (placements, links, generated labels, and similar churn), not a second
+# user intent.  Replaying the original Geometry/Constraints properties lets
+# every peer regenerate this state locally.
+DERIVED_TRANSACTION_NAMES = {"Sketch recompute"}
+
 
 def _property_status(obj, property_name: str) -> Set[str]:
     try:
@@ -234,12 +241,14 @@ class TransactionRecorder:
             return
         state = self._active
         self._active = None
+        if state.name in DERIVED_TRANSACTION_NAMES:
+            return
         operations: List[Operation] = []
         edited_property_key = _edited_property_key(state)
 
         # Create all objects before restoring their contents during replay so
         # same-document links can resolve even when they point forward.
-        for uid, obj in state.created.items():
+        for uid, obj in state.created.items() if edited_property_key is None else ():
             if document.getObject(obj.Name) is None:
                 continue
             operations.append(

@@ -100,18 +100,23 @@ class QtDocumentSession(QtCore.QObject):
         if self.status == "conflict":
             self.conflicted_local.append(packet)
             return
-        self.pending_local.append((packet, document_state(self.document)))
+        # Packet capture is intentionally local-first.  Full document hashing
+        # can traverse thousands of properties and every generated shape; it
+        # must not sit between a FreeCAD commit and the next user interaction.
+        # Interactive submissions are accepted provisionally and validated by
+        # a separate headless worker.
+        self.pending_local.append(packet)
         if self.status in {"connected", "synchronized"}:
             self._submit_next()
 
     def _submit_next(self):
         if self.awaiting_acceptance or not self.pending_local:
             return
-        packet, state = self.pending_local.popleft()
+        packet = self.pending_local.popleft()
         packet.base_revision = self.revision
-        self.inflight = (packet, state)
+        self.inflight = packet
         self.awaiting_acceptance.add(packet.transaction_uid)
-        self.transport.submit(packet, state)
+        self.transport.submit(packet, None)
         self._set_status("submitting")
 
     @QtCore.Slot()
@@ -150,9 +155,13 @@ class QtDocumentSession(QtCore.QObject):
                 self.transport.request_revisions(self.revision)
             else:
                 self._replace_validation(message.get("validation"))
-                local = document_state(self.document)
-                if local.definition_hash != message["definition_hash"]:
-                    raise RuntimeError("local checkpoint does not match the server")
+                # A revision-zero share has a canonical checkpoint hash.  Once
+                # edits exist, packet replay plus headless validation owns the
+                # expensive full-state comparison.
+                if head == 0 and message.get("definition_hash"):
+                    local = document_state(self.document)
+                    if local.definition_hash != message["definition_hash"]:
+                        raise RuntimeError("local checkpoint does not match the server")
                 self._set_status("connected")
                 self._submit_next()
             return
@@ -167,7 +176,6 @@ class QtDocumentSession(QtCore.QObject):
             self._replace_validation(self._deferred_validation)
             self._deferred_validation = None
             self.recorder.base_revision = self.revision
-            self.transport.report_state(self.revision, document_state(self.document))
             self._set_status("synchronized")
             self._submit_next()
             return
@@ -222,8 +230,8 @@ class QtDocumentSession(QtCore.QObject):
     def _begin_rebase(self):
         local = []
         if self.inflight is not None:
-            local.append(self.inflight[0])
-        local.extend(packet for packet, _state in self.pending_local)
+            local.append(self.inflight)
+        local.extend(self.pending_local)
         if not local:
             self.transport.request_revisions(self.revision)
             return
@@ -254,11 +262,11 @@ class QtDocumentSession(QtCore.QObject):
                     recorder=self.recorder,
                     validate_document_uid=False,
                 )
-                replayed.append((packet, document_state(self.document)))
+                replayed.append(packet)
         except Exception:
             conflict = True
         if conflict:
-            self.conflicted_local = [packet for packet, _state in replayed]
+            self.conflicted_local = list(replayed)
             self.last_error = "local edits overlap a newer server revision"
             self._set_status("conflict")
             return
@@ -274,8 +282,7 @@ class QtDocumentSession(QtCore.QObject):
                 self.document.undo()
         self.conflicted_local = []
         self.last_error = ""
-        self.transport.report_state(self.revision, document_state(self.document))
-        self._set_status("validating")
+        self._set_status("synchronized")
 
     def _replace_locks(self, locks):
         self.locks = {lock["object_uid"]: lock for lock in locks}
@@ -333,8 +340,7 @@ class QtDocumentSession(QtCore.QObject):
             self._set_status("synchronized")
             self._submit_next()
         else:
-            self.transport.report_state(revision, document_state(self.document))
-            self._set_status("validating")
+            self._set_status("synchronized")
 
     def close(self):
         self.timer.stop()

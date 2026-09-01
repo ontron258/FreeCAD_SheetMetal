@@ -424,7 +424,16 @@ class RevisionStore:
             "DELETE FROM object_locks WHERE expires_at <= ?", (time.time(),)
         )
 
-    def append(self, packet: TransactionPacket, state: DocumentState) -> RevisionRecord:
+    def append(
+        self, packet: TransactionPacket, state: Optional[DocumentState] = None
+    ) -> RevisionRecord:
+        """Accept a packet without requiring the GUI to hash the whole model.
+
+        A supplied state remains supported for batch/headless clients.  An
+        interactive client may omit it; the revision is then provisional until
+        a headless validator supplies the authoritative definition and result
+        hashes.
+        """
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             duplicate = self.connection.execute(
@@ -471,8 +480,8 @@ class RevisionStore:
                     head,
                     packet.name,
                     packet.to_json(),
-                    state.definition_hash,
-                    state.result_hash,
+                    state.definition_hash if state is not None else "",
+                    state.result_hash if state is not None else "",
                     packet.environment_id,
                 ),
             )
@@ -484,8 +493,8 @@ class RevisionStore:
                 """,
                 (
                     revision,
-                    state.definition_hash,
-                    state.result_hash,
+                    state.definition_hash if state is not None else "",
+                    state.result_hash if state is not None else "",
                     packet.document_uid,
                 ),
             )
@@ -598,14 +607,34 @@ class RevisionStore:
         definition_hash = state.definition_hash if state is not None else ""
         result_hash = state.result_hash if state is not None else ""
         environment_matches = environment_id == expected["environment_id"]
-        definition_matches = bool(state) and definition_hash == expected["definition_hash"]
-        result_matches = bool(state) and result_hash == expected["result_hash"]
+        provisional = not expected["definition_hash"] and not expected["result_hash"]
+        definition_matches = bool(state) and (
+            provisional or definition_hash == expected["definition_hash"]
+        )
+        result_matches = bool(state) and (
+            provisional or result_hash == expected["result_hash"]
+        )
         valid = bool(
             not error
             and environment_matches
             and definition_matches
             and result_matches
         )
+        if valid and provisional:
+            self.connection.execute(
+                """
+                UPDATE revisions SET definition_hash = ?, result_hash = ?
+                WHERE document_uid = ? AND revision = ?
+                """,
+                (definition_hash, result_hash, document_uid, int(revision)),
+            )
+            self.connection.execute(
+                """
+                UPDATE documents SET definition_hash = ?, result_hash = ?
+                WHERE document_uid = ? AND head_revision = ?
+                """,
+                (definition_hash, result_hash, document_uid, int(revision)),
+            )
         self.connection.execute(
             """
             INSERT INTO validation_results (

@@ -23,6 +23,9 @@ packets must remain the fallback for unknown workbenches.
   editable input property. Derived shapes, caches, pattern children, and other
   recompute output are regenerated independently by each client instead of
   being serialized as hundreds of redundant operations.
+- Suppresses FreeCAD's follow-up `Sketch recompute` transactions after the
+  user-owned sketch geometry/constraint edit has already been captured. This
+  prevents dependency-graph fan-out from becoming dozens of network edits.
 - Uses FreeCAD's native `dumpContent`, `dumpPropertyContent`, `restoreContent`,
   and `restorePropertyContent` APIs for workbench-neutral payloads.
 - Encodes native persistence payloads as Base64 so packets can be stored as
@@ -53,6 +56,10 @@ packets must remain the fallback for unknown workbenches.
   catch a late client up from the revision log.
 - Runs relay networking on a background asyncio thread while a Qt timer applies
   incoming packets on FreeCAD's main GUI thread.
+- Uses a local-first interactive submission path: a committed GUI transaction
+  is queued immediately without synchronously hashing every object and shape.
+  The relay sequences it provisionally and a later headless pass supplies the
+  authoritative definition and generated-result hashes.
 - Synchronizes edits bidirectionally between two independent FreeCAD Python
   processes through the real relay protocol.
 - Stores an immutable, complete FCStd revision-zero checkpoint so an empty GUI
@@ -105,9 +112,11 @@ GET  /documents/{document_uid}/ws?client_id={client_id}
 ```
 
 The WebSocket currently accepts `submit`, `state_report`, `acquire_locks`, and
-`release_locks` messages. Accepted revisions are initially provisional because
-the submitting client supplies their state hashes; the independent validator
-then marks each revision valid or invalid.
+`release_locks` messages. Batch/headless clients may still submit state hashes,
+but interactive GUI clients omit them so full model hashing never blocks the
+editing loop. Those revisions have empty provisional hashes until the
+independent validator reconstructs the revision, supplies the authoritative
+hashes, and marks it valid or invalid.
 
 `freecad_collaboration.session.DocumentSession` now connects the transaction
 recorder and replayer to this protocol. Its network methods are asynchronous,
@@ -188,6 +197,10 @@ identity.
   workbench coverage.
 - Geometry and Sketcher list elements do not yet receive collaboration-level
   identifiers.
+- The GUI outbox is currently in memory. Edits continue locally while uploads
+  are pending, but a crash or closing FreeCAD before acknowledgement can lose
+  queued packets. A durable local SQLite outbox and reconnect/resume protocol
+  are the next reliability slice.
 - Compact property-edit recording currently recognizes FreeCAD's standard
   `Edit Object.Property` transaction name. Other commands use the generic
   filtered transaction fallback until operation intent is represented
@@ -201,13 +214,16 @@ identity.
   starts editing and property-level locks are not implemented yet.
 - Automatic rebase covers address-disjoint transactions. Semantically
   mergeable edits to the same list-valued property still require a future
-  workbench-aware merge layer.
+  workbench-aware merge layer. Two dimensions in one sketch therefore still
+  collide at the coarse `Sketch.Constraints`/`Sketch.Geometry` property level.
 - A submission rejected because another client already holds a lock leaves the
   local client divergent; the current recovery is to disconnect and join into
   a new empty document. A one-click reset/rebase workflow remains.
 - Headless validation is asynchronous and currently requires a separately
-  started worker. Invalid revisions are flagged but not automatically rolled
-  back or quarantined.
+  started worker. Its current reconstruction starts from revision zero for each
+  validation job, so it should be run after an idle/debounce period for large
+  models until incremental checkpoint reuse is implemented. Invalid revisions
+  are flagged but not automatically rolled back or quarantined.
 - The relay has no authentication or network hardening yet.
 - Object creation replay assumes the receiving FreeCAD installation provides
   the same registered object types and Python proxies.
@@ -235,7 +251,7 @@ has one upload the checkpoint, has the other restore it, synchronizes an edit,
 compares both client hashes, launches a separate headless validator, and
 requires its independently reconstructed revision to match.
 
-The current suite contains 29 tests. A manual persistent client launcher for
+The current suite contains 33 tests. A manual persistent client launcher for
 local two-window trials is available at `tools/live_collaboration_client.py`;
 it reads the documented `FREECAD_COLLAB_LIVE_*` environment variables and is
 passed to `FreeCAD.exe` as a positional startup script.
@@ -258,3 +274,6 @@ passed to `FreeCAD.exe` as a positional startup script.
    schema validation, and database lifecycle management before non-local use.
 7. Add an independent headless validator. **Implemented as a polling worker;
    automatic worker supervision and invalid-revision quarantine remain.**
+8. Persist the GUI packet outbox and resume it across disconnect/restart, then
+   add idle/debounced incremental validator checkpoints so validation never
+   competes with interactive recompute.

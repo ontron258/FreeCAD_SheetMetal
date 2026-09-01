@@ -112,6 +112,38 @@ class CollaborationTransactionTests(unittest.TestCase):
             [("Parameters", "Count")],
         )
 
+    def test_property_editor_transaction_omits_created_recompute_outputs(self):
+        source = self.new_document("PropertyEditorCreateSource")
+        feature = source.addObject("Part::FeaturePython", "Parameters")
+        feature.addProperty("App::PropertyInteger", "Count", "Inputs")
+        bootstrap_document(source)
+        recorder = self.recorder(source)
+
+        source.openTransaction("Edit Parameters.Count")
+        feature.Count = 4
+        source.addObject("Part::Feature", "GeneratedResult")
+        source.commitTransaction()
+
+        self.assertEqual(len(recorder.packets), 1)
+        operations = recorder.packets[0].operations
+        self.assertEqual(
+            [(operation.kind, operation.object_name, operation.property_name)
+             for operation in operations],
+            [("set_property", "Parameters", "Count")],
+        )
+
+    def test_sketch_recompute_transaction_is_not_recorded(self):
+        source = self.new_document("SketchRecomputeSource")
+        sketch = source.addObject("Sketcher::SketchObject", "Sketch")
+        bootstrap_document(source)
+        recorder = self.recorder(source)
+
+        source.openTransaction("Sketch recompute")
+        sketch.Label = "Derived label churn"
+        source.commitTransaction()
+
+        self.assertEqual(recorder.packets, [])
+
     def test_created_objects_and_forward_link_replay(self):
         source = self.new_document("CreateSource")
         bootstrap_document(source)

@@ -66,14 +66,14 @@ class RelayClient:
             response.raise_for_status()
             return await response.json()
 
-    async def submit(self, packet, state):
-        await self.websocket.send_json(
-            {
-                "type": "submit",
-                "packet": packet.to_dict(),
-                "state": state.to_dict(),
-            }
-        )
+    async def submit(self, packet, state=None):
+        message = {
+            "type": "submit",
+            "packet": packet.to_dict(),
+        }
+        if state is not None:
+            message["state"] = state.to_dict()
+        await self.websocket.send_json(message)
 
     async def report_state(self, revision: int, state):
         await self.websocket.send_json(

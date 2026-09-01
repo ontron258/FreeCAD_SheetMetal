@@ -128,6 +128,18 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["head_revision"], 0)
         await first.close()
 
+    async def test_interactive_packet_can_be_submitted_without_state_hash(self):
+        first = await self.connect("local-first")
+        packet = self.packet()
+        await first.send_json({"type": "submit", "packet": packet.to_dict()})
+
+        accepted = await first.receive_json()
+        self.assertEqual(accepted["type"], "accepted")
+        self.assertEqual(accepted["revision"], 1)
+        self.assertEqual(accepted["state"]["definition_hash"], "")
+        self.assertEqual(accepted["state"]["result_hash"], "")
+        await first.close()
+
     async def test_feature_lock_blocks_another_clients_packet(self):
         first = await self.connect("first")
         second = await self.connect("second")

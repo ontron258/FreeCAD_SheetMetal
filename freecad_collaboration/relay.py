@@ -160,7 +160,8 @@ async def _handle_submit(request, socket, message, client_id):
     route_document_uid = request.match_info["document_uid"]
     if packet.document_uid != route_document_uid:
         raise ValueError("packet document does not match WebSocket route")
-    state = DocumentState.from_dict(message["state"])
+    state_data = message.get("state")
+    state = DocumentState.from_dict(state_data) if state_data is not None else None
     request.app[STORE_KEY].validate_packet_locks(packet, client_id)
     record = request.app[STORE_KEY].append(packet, state)
     payload = {

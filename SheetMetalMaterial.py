@@ -398,7 +398,6 @@ def applyMaterialDefaults(part, create_configuration=False):
         if part.EffectiveMaterial != "Manual":
             part.EffectiveMaterial = "Manual"
         _update_editor_modes(part)
-        updatePartWeight(part)
         return None
     material = _effective_material(part, create_configuration)
     defaults = standardSheetMetalParameters(material, str(part.SheetSize))
@@ -417,10 +416,13 @@ def applyMaterialDefaults(part, create_configuration=False):
     ):
         part.KFactor = defaults["k_factor"]
     density = defaults["density"]
+    density_changed = False
     if abs(part.Density.getValueAs("kg/m^3") - density) > 1.0e-9:
         part.Density = "{} kg/m^3".format(density)
+        density_changed = True
     _update_editor_modes(part)
-    updatePartWeight(part)
+    if density_changed:
+        updatePartWeight(part)
     return defaults
 
 
@@ -487,6 +489,13 @@ class _MaterialDefaultsObserver:
 
     def __init__(self):
         self.updating = False
+        self.pending_weight_parts = {}
+
+    def _queue_weight_update(self, part):
+        doc = getattr(part, "Document", None)
+        if doc is None:
+            return
+        self.pending_weight_parts[(doc.Name, part.Name)] = part
 
     def slotChangedObject(self, obj, prop):
         if self.updating:
@@ -499,13 +508,16 @@ class _MaterialDefaultsObserver:
                     prop == "FollowMaterialUpgrade" and obj.FollowMaterialUpgrade,
                 )
                 return
-            if _is_sheet_metal_part(obj) and prop in ("Density", "Tip"):
+            if _is_sheet_metal_part(obj) and prop == "Density":
                 updatePartWeight(obj)
+                return
+            if _is_sheet_metal_part(obj) and prop == "Tip":
+                self._queue_weight_update(obj)
                 return
             if prop == "Shape":
                 part = findSheetMetalPart(obj)
                 if part is not None and part is not obj:
-                    updatePartWeight(part)
+                    self._queue_weight_update(part)
                 return
             if (
                 prop == "MaterialUpgrade"
@@ -536,9 +548,16 @@ class _MaterialDefaultsObserver:
             return
         try:
             self.updating = True
-            for obj in doc.Objects:
-                if _is_sheet_metal_part(obj):
-                    updatePartWeight(obj)
+            document_key = doc.Name
+            pending = [
+                (key, part)
+                for key, part in self.pending_weight_parts.items()
+                if key[0] == document_key
+            ]
+            for key, part in pending:
+                self.pending_weight_parts.pop(key, None)
+                if getattr(part, "Document", None) is doc:
+                    updatePartWeight(part)
         finally:
             self.updating = False
 

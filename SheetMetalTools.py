@@ -1336,3 +1336,79 @@ class UnfoldException(Exception):
 
 class SMException(Exception):
     """Sheet Metal Custom Exception."""
+
+
+def ensureVarSetExpressionOutputs(obj):
+    """Mark expression-driven ``App::VarSet`` properties as outputs.
+
+    FreeCAD only propagates changes from a VarSet property to downstream
+    expressions when the computed property has Output status.  The GUI does
+    not add that status automatically when an expression is assigned, which
+    can leave otherwise valid configuration models stale after an input
+    changes.
+
+    Return the property names repaired on *obj*.
+    """
+    if obj is None or getattr(obj, "TypeId", "") != "App::VarSet":
+        return []
+
+    repaired = []
+    properties = set(getattr(obj, "PropertiesList", ()))
+    for expression in getattr(obj, "ExpressionEngine", ()):
+        if not expression:
+            continue
+        property_name = str(expression[0]).split(".", 1)[0]
+        if property_name not in properties:
+            continue
+        try:
+            status = obj.getPropertyStatus(property_name)
+            if "Output" in status:
+                continue
+            obj.setPropertyStatus(property_name, "Output")
+            repaired.append(property_name)
+        except (AttributeError, RuntimeError, TypeError):
+            continue
+    return repaired
+
+
+def ensureDocumentVarSetExpressionOutputs(doc):
+    """Repair dependency propagation for every computed VarSet in *doc*."""
+    repaired = []
+    if doc is None:
+        return repaired
+    for obj in getattr(doc, "Objects", ()):
+        for property_name in ensureVarSetExpressionOutputs(obj):
+            repaired.append((obj, property_name))
+    return repaired
+
+
+class _VarSetExpressionOutputObserver:
+    """Keep newly-authored and restored VarSet expressions dependency-safe."""
+
+    def __init__(self):
+        self.updating = False
+
+    def slotChangedObject(self, obj, _prop):
+        if self.updating or getattr(obj, "TypeId", "") != "App::VarSet":
+            return
+        try:
+            self.updating = True
+            ensureVarSetExpressionOutputs(obj)
+        finally:
+            self.updating = False
+
+    def slotActivateDocument(self, doc):
+        if self.updating:
+            return
+        try:
+            self.updating = True
+            ensureDocumentVarSetExpressionOutputs(doc)
+        finally:
+            self.updating = False
+
+
+if "_varset_expression_output_observer" not in globals():
+    _varset_expression_output_observer = _VarSetExpressionOutputObserver()
+    FreeCAD.addDocumentObserver(_varset_expression_output_observer)
+    for _open_document in FreeCAD.listDocuments().values():
+        ensureDocumentVarSetExpressionOutputs(_open_document)

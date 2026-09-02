@@ -4,9 +4,11 @@ import math
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import FreeCAD as App
 import Part
+import SheetMetalShapedFlangeCmd as ShapedFlangeModule
 
 from SheetMetalShapedFlangeCmd import (
     FACE_GEOMETRY_VERSION,
@@ -451,6 +453,41 @@ class TestShapedFlange(unittest.TestCase):
         self.assertEqual(len(formed_end_faces), 2)
         self.assertTrue(all(face.Area > 0.0 for face in formed_end_faces))
 
+    def test_angled_bend_clip_cache_reuses_identical_geometry(self):
+        base = _panel(
+            "Base",
+            [App.Vector(0, 0, 0), App.Vector(20, 0, 0),
+             App.Vector(20, 10, 0), App.Vector(0, 10, 0)],
+        )
+        wall = _panel(
+            "AngledWall",
+            [App.Vector(0, 0, 0), App.Vector(2, 0, 4),
+             App.Vector(18, 0, 4), App.Vector(20, 0, 0)],
+            App.Placement(
+                App.Vector(), App.Rotation(App.Vector(1, 0, 0), 90)
+            ),
+        )
+        stages = [
+            {"sketches": [base], "radius": 1.0,
+             "thickness_side": "Centered"},
+            {"sketches": [wall], "radius": 1.0,
+             "thickness_side": "Centered"},
+        ]
+        ShapedFlangeModule._bend_clip_cache.clear()
+        with mock.patch.object(
+            ShapedFlangeModule,
+            "_bend_end_cutting_solid",
+            wraps=ShapedFlangeModule._bend_end_cutting_solid,
+        ) as cutter:
+            first = makeShapedFlangeStages(stages, thickness=1.0)
+            first_call_count = cutter.call_count
+            second = makeShapedFlangeStages(stages, thickness=1.0)
+
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(cutter.call_count, first_call_count)
+        self.assertAlmostEqual(first.Volume, second.Volume)
+        self.assertTrue(second.isValid())
+
     def test_rectangle_and_round_bend_reliefs_cut_both_bend_ends(self):
         base = _panel(
             "Base",
@@ -618,6 +655,46 @@ class TestShapedFlange(unittest.TestCase):
                 if type(face.Surface).__name__ == "Cylinder"
             )
             self.assertEqual(cylinder_radii, [5.0, 7.0])
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_feature_runtime_cache_reuses_and_invalidates_geometry(self):
+        doc = App.newDocument("ShapedFlangeRuntimeCache")
+        try:
+            sheet_part = createSheetMetalPart(doc)
+            sheet_part.UseMaterialCatalog = False
+            sheet_part.Thickness = 2.0
+            profile = doc.addObject("Part::Feature", "Profile")
+            profile.Shape = Part.makePolygon(
+                [App.Vector(0, 0, 0), App.Vector(10, 0, 0),
+                 App.Vector(10, 10, 0), App.Vector(0, 10, 0),
+                 App.Vector(0, 0, 0)]
+            )
+            feature = doc.addObject("Part::FeaturePython", "ShapedFlange")
+            SMShapedFlange(feature, [profile], sheet_part)
+            sheet_part.addObject(feature)
+            sheet_part.Tip = feature.Name
+            doc.recompute()
+            initial_volume = feature.Shape.Volume
+
+            with mock.patch.object(
+                ShapedFlangeModule,
+                "makeShapedFlangeStages",
+                wraps=ShapedFlangeModule.makeShapedFlangeStages,
+            ) as builder:
+                feature.touch()
+                doc.recompute()
+                self.assertEqual(builder.call_count, 0)
+
+                profile.Shape = Part.makePolygon(
+                    [App.Vector(0, 0, 0), App.Vector(20, 0, 0),
+                     App.Vector(20, 10, 0), App.Vector(0, 10, 0),
+                     App.Vector(0, 0, 0)]
+                )
+                doc.recompute()
+                self.assertEqual(builder.call_count, 1)
+
+            self.assertAlmostEqual(feature.Shape.Volume, initial_volume * 2.0)
         finally:
             App.closeDocument(doc.Name)
 

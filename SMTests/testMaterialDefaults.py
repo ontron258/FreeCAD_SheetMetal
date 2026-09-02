@@ -7,6 +7,8 @@ import unittest
 import FreeCAD as App
 import Part
 
+from SheetMetalTools import ensureDocumentVarSetExpressionOutputs
+
 from SheetMetalBaseCmd import (
     SMBaseBend,
     migrateDocumentBaseBends,
@@ -59,6 +61,33 @@ class TestMaterialDefaults(unittest.TestCase):
         self.assertAlmostEqual(stainless["k_factor"], 0.45)
         self.assertAlmostEqual(hrs["density"], 7850.0)
         self.assertAlmostEqual(stainless["density"], 8000.0)
+
+    def test_computed_varset_properties_propagate_to_consumers(self):
+        doc = App.newDocument("SheetMetalVarSetOutputs")
+        try:
+            cage = doc.addObject("App::VarSet", "Cage")
+            cage.addProperty("App::PropertyInteger", "Tiers")
+            cage.addProperty("App::PropertyLength", "Step")
+            cage.addProperty("App::PropertyLength", "RowHeight")
+            cage.Tiers = 2
+            cage.Step = 100.0
+            cage.setExpression("RowHeight", "Step * Tiers")
+
+            consumer = doc.addObject("PartDesign::Feature", "Panel")
+            consumer.addProperty("App::PropertyLength", "Length")
+            consumer.setExpression("Length", "Cage.RowHeight")
+
+            ensureDocumentVarSetExpressionOutputs(doc)
+            doc.recompute()
+            self.assertIn("Output", cage.getPropertyStatus("RowHeight"))
+            self.assertAlmostEqual(consumer.Length.Value, 200.0)
+
+            cage.Tiers = 4
+            doc.recompute()
+            self.assertAlmostEqual(cage.RowHeight.Value, 400.0)
+            self.assertAlmostEqual(consumer.Length.Value, 400.0)
+        finally:
+            App.closeDocument(doc.Name)
 
     def test_part_weight_uses_catalog_density_and_current_tip_volume(self):
         doc = App.newDocument("SheetMetalPartWeight")

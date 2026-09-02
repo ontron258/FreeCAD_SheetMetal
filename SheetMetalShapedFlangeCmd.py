@@ -19,8 +19,10 @@ bend.  The reference surface is the sheet mid-plane, which makes the result
 independent of sketch winding and normal direction.
 """
 
+import hashlib
 import math
 import os
+from collections import OrderedDict
 
 import FreeCAD
 import Part
@@ -37,6 +39,8 @@ smEpsilon = SheetMetalTools.smEpsilon
 smShapedFlangeDefaultVars = ["BendRadius"]
 RELIEF_TYPES = ["None", "Tear", "Rectangle", "Round"]
 FACE_GEOMETRY_VERSION = 1
+_BEND_CLIP_CACHE_LIMIT = 128
+_bend_clip_cache = OrderedDict()
 
 
 def _ensure_enumeration_options(obj, property_name, options, default):
@@ -404,6 +408,38 @@ def _clip_bend_to_angled_ends(
     both sheet surfaces so OpenCASCADE retains the exact cylindrical inner and
     outer bend faces.
     """
+    vector_names = (
+        "p0", "p1", "axis", "center", "radial1", "radial2",
+        "inward1", "inward2",
+    )
+    cache_key = (
+        _shape_runtime_signature(bend),
+        _shape_runtime_signature(first_face),
+        _shape_runtime_signature(first_edge),
+        _shape_runtime_signature(second_face),
+        _shape_runtime_signature(second_edge),
+        tuple(
+            (
+                name,
+                data[name].x,
+                data[name].y,
+                data[name].z,
+            )
+            for name in vector_names
+            if name in data
+        ),
+        float(data.get("length", 0.0)),
+        float(data.get("relief_base_depth1", data.get("setback", 0.0))),
+        float(data.get("relief_base_depth2", data.get("setback", 0.0))),
+        float(radius),
+        float(thickness),
+        float(tolerance),
+    )
+    cached = _bend_clip_cache.get(cache_key)
+    if cached is not None:
+        _bend_clip_cache.move_to_end(cache_key)
+        return cached.copy()
+
     result = bend
     axis = data["axis"]
     diagonal = math.sqrt(
@@ -460,6 +496,10 @@ def _clip_bend_to_angled_ends(
                 )
             )
         result = clipped
+    _bend_clip_cache[cache_key] = result.copy()
+    _bend_clip_cache.move_to_end(cache_key)
+    while len(_bend_clip_cache) > _BEND_CLIP_CACHE_LIMIT:
+        _bend_clip_cache.popitem(last=False)
     return result
 
 
@@ -1251,6 +1291,83 @@ def _stage_from_feature(feature):
     }
 
 
+def _shape_runtime_signature(shape):
+    """Return a stable geometry token for an OCC shape.
+
+    OCC's native hash identifies the transient TShape and therefore changes
+    when Sketcher rebuilds identical geometry.  A compact digest of the BREP
+    remains stable across those rebuilds while still invalidating edits.
+    """
+    if shape is None or shape.isNull():
+        return None
+    bounds = shape.BoundBox
+    return (
+        hashlib.blake2b(
+            shape.exportBrepToString().encode("utf-8"), digest_size=16
+        ).digest(),
+        len(shape.Vertexes),
+        len(shape.Edges),
+        len(shape.Wires),
+        len(shape.Faces),
+        len(shape.Solids),
+        bounds.XMin,
+        bounds.YMin,
+        bounds.ZMin,
+        bounds.XMax,
+        bounds.YMax,
+        bounds.ZMax,
+    )
+
+
+def _placement_runtime_signature(placement):
+    if placement is None:
+        return None
+    quaternion = placement.Rotation.Q
+    return (
+        placement.Base.x,
+        placement.Base.y,
+        placement.Base.z,
+        quaternion[0],
+        quaternion[1],
+        quaternion[2],
+        quaternion[3],
+    )
+
+
+def _shaped_flange_cache_key(stages, thickness, refine):
+    """Describe every input consumed by ``makeShapedFlangeStages``."""
+    stage_keys = []
+    for stage in stages:
+        sketch_keys = []
+        for sketch in stage.get("sketches", ()):
+            sketch_keys.append(
+                (
+                    getattr(sketch, "Name", ""),
+                    _shape_runtime_signature(getattr(sketch, "Shape", None)),
+                    _placement_runtime_signature(
+                        getattr(sketch, "Placement", None)
+                    ),
+                )
+            )
+        stage_keys.append(
+            (
+                tuple(sketch_keys),
+                tuple(stage.get("region_operations", ())),
+                float(stage.get("radius", 1.0)),
+                str(stage.get("thickness_side", "Centered")),
+                str(stage.get("relief_type", "None")),
+                float(stage.get("relief_width", 0.0)),
+                float(stage.get("relief_depth", 0.0)),
+            )
+        )
+    return (
+        FACE_GEOMETRY_VERSION,
+        float(thickness),
+        bool(refine),
+        tuple(stage_keys),
+    )
+
+
 class SMShapedFlange:
     """One cumulative Face operation in a SheetMetalPart history."""
 
@@ -1366,13 +1483,25 @@ class SMShapedFlange:
                     "" if index == 0 else "{:03d}".format(index)
                 )
         stages = [_stage_from_feature(feature) for feature in history]
-        result = makeShapedFlangeStages(
-            stages,
-            thickness=sheet_metal_part.Thickness.Value,
-            refine=fp.Refine,
-        )
-        fp.Shape = result
-        fp.FaceGeometryVersion = FACE_GEOMETRY_VERSION
+        thickness = sheet_metal_part.Thickness.Value
+        cache_key = _shaped_flange_cache_key(stages, thickness, fp.Refine)
+        if getattr(self, "_shape_cache_key", None) == cache_key:
+            cached_result = getattr(self, "_shape_cache_result", None)
+        else:
+            cached_result = None
+
+        if cached_result is None or cached_result.isNull():
+            result = makeShapedFlangeStages(
+                stages,
+                thickness=thickness,
+                refine=fp.Refine,
+            )
+            self._shape_cache_key = cache_key
+            self._shape_cache_result = result.copy()
+            fp.Shape = result
+
+        if fp.FaceGeometryVersion != FACE_GEOMETRY_VERSION:
+            fp.FaceGeometryVersion = FACE_GEOMETRY_VERSION
 
 
 def migrateDocumentFaceGeometry(doc):
@@ -1384,6 +1513,10 @@ def migrateDocumentFaceGeometry(doc):
         ):
             continue
         proxy = getattr(obj, "Proxy", None)
+        if proxy is None:
+            proxy = SMShapedFlange.__new__(SMShapedFlange)
+            obj.Proxy = proxy
+            obj.touch()
         if proxy is not None and hasattr(proxy, "addVerifyProperties"):
             proxy.addVerifyProperties(obj)
         else:
@@ -1469,6 +1602,41 @@ if SheetMetalTools.isGuiLoaded():
 
         def getTaskPanel(self, obj):
             return SMShapedFlangeTaskPanel(obj)
+
+
+    def repairShapedFlangeViewProviders(doc):
+        """Restore Face edit providers after a null-proxy save."""
+        repaired = []
+        if doc is None:
+            return repaired
+        for obj in doc.Objects:
+            if getattr(obj, "SheetMetalType", "") != "Face":
+                continue
+            view_object = getattr(obj, "ViewObject", None)
+            if view_object is None:
+                continue
+            if not isinstance(
+                getattr(view_object, "Proxy", None),
+                SMShapedFlangeViewProvider,
+            ):
+                SMShapedFlangeViewProvider(view_object)
+                repaired.append(obj)
+        return repaired
+
+
+    class _ShapedFlangeViewProviderObserver:
+        def slotActivateDocument(self, doc):
+            migrateDocumentFaceGeometry(doc)
+            repairShapedFlangeViewProviders(doc)
+
+
+    if "_shaped_flange_view_provider_observer" not in globals():
+        _shaped_flange_view_provider_observer = (
+            _ShapedFlangeViewProviderObserver()
+        )
+        FreeCAD.addDocumentObserver(_shaped_flange_view_provider_observer)
+        for _open_document in FreeCAD.listDocuments().values():
+            repairShapedFlangeViewProviders(_open_document)
 
 
     class SMShapedFlangeTaskPanel:

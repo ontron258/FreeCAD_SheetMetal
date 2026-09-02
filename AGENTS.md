@@ -29,6 +29,10 @@ Branch conventions:
 - `master` mirrors `upstream/master`. Do not develop directly on it.
 - `dev` is the integration branch for the complete local feature set.
 - Use focused topic branches when preparing isolated upstream contributions.
+- Keep the transaction-level collaboration prototype on
+  `feature/collaboration-prototype` in
+  `C:\FreeCAD\worktrees\FreeCAD_Collaboration` until it is explicitly promoted.
+  Rebase that private branch onto `dev` after integrating SheetMetal changes.
 
 Keep commits cohesive and independently understandable. In particular, avoid
 mixing an isolated bug fix with a large UI or object-model change. Do not force
@@ -37,6 +41,9 @@ push, rewrite shared history, open an upstream pull request, or merge into
 
 Before editing, inspect `git status`. Preserve unrelated user changes and never
 use destructive cleanup commands such as `git reset --hard`.
+
+The workspace-wide directory, retention, cleanup, and multi-agent rules are in
+`C:\FreeCAD\WORKSPACE_ORGANIZATION.md` and apply in addition to this guide.
 
 ## Important feature areas
 

@@ -15,14 +15,20 @@ from SheetMetalBoltConnectionCmd import (
     create_bolted_connection,
 )
 from SheetMetalConnectedPatternCmd import (
+    SMLCSPlacedPart,
     SMConnectedPartPattern,
     SMConnectedPatternCut,
+    create_lcs_placed_part,
     create_connected_part_pattern,
     linear_direction_definition,
     polar_axis_definition,
     pattern_transforms,
     migrate_connected_part_patterns,
+    repair_connected_part_patterns,
+    repair_lcs_placed_parts,
+    resolve_lcs_placement_selection,
     set_parent_pattern,
+    set_seed_placement,
     sync_connection_participant_patterns,
 )
 from SheetMetalShapedFlangeCmd import addSheetMetalPartProperties
@@ -77,6 +83,274 @@ def _configured_polar_pattern(doc):
 
 
 class TestConnectedPattern(unittest.TestCase):
+    def test_lcs_placed_part_tracks_source_and_target_frames(self):
+        doc = App.newDocument("LCSPlacedPart")
+        try:
+            source, _source_base = _sheet_part(
+                doc,
+                "PlacedSource",
+                Part.makeBox(4.0, 2.0, 1.0),
+            )
+            source_lcs = doc.addObject("Part::Feature", "SourceFrame")
+            source_lcs.Placement = App.Placement(
+                App.Vector(5.0, 2.0, 0.0), App.Rotation()
+            )
+            source.addObject(source_lcs)
+            target_lcs = doc.addObject("Part::Feature", "TargetFrame")
+            target_lcs.Placement = App.Placement(
+                App.Vector(50.0, 20.0, 0.0),
+                App.Rotation(App.Vector(0.0, 0.0, 1.0), 90.0),
+            )
+
+            controller, link = create_lcs_placed_part(
+                doc, source, source_lcs, target_lcs
+            )
+            doc.recompute()
+            expected = target_lcs.getGlobalPlacement().multiply(
+                source_lcs.getGlobalPlacement().inverse()
+            )
+
+            self.assertIsInstance(controller.Proxy, SMLCSPlacedPart)
+            self.assertIs(controller.InstanceLink, link)
+            self.assertIn(controller, link.InList)
+            self.assertIn(controller, doc.ConnectedPartPatterns.Group)
+            self.assertNotIn(link, doc.ConnectedPartPatterns.Group)
+            self.assertTrue(link.LinkTransform)
+            self.assertLess(
+                (link.LinkPlacement.Base - expected.Base).Length, 1.0e-9
+            )
+            self.assertLess(
+                link.LinkPlacement.Rotation.multiply(
+                    expected.Rotation.inverted()
+                ).Angle,
+                1.0e-9,
+            )
+
+            target_lcs.Placement = App.Placement(
+                App.Vector(80.0, 30.0, 0.0),
+                App.Rotation(App.Vector(0.0, 0.0, 1.0), 180.0),
+            )
+            doc.recompute()
+            updated = target_lcs.getGlobalPlacement().multiply(
+                source_lcs.getGlobalPlacement().inverse()
+            )
+            self.assertLess(
+                (link.LinkPlacement.Base - updated.Base).Length, 1.0e-9
+            )
+            self.assertEqual(controller.LastError, "")
+
+            controller.Proxy = None
+            repaired = repair_lcs_placed_parts(doc)
+            self.assertEqual(repaired, [controller])
+            self.assertIsInstance(controller.Proxy, SMLCSPlacedPart)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_lcs_placement_selection_is_compact_and_unambiguous(self):
+        doc = App.newDocument("LCSPlacementSelection")
+        try:
+            source, _source_base = _sheet_part(
+                doc, "SelectionSource", Part.makeBox(4.0, 2.0, 1.0)
+            )
+            source_lcs = doc.addObject(
+                "Part::LocalCoordinateSystem", "SelectionSourceLCS"
+            )
+            source.addObject(source_lcs)
+            target_lcs = doc.addObject(
+                "Part::LocalCoordinateSystem", "SelectionTargetLCS"
+            )
+
+            resolved = resolve_lcs_placement_selection(
+                [source_lcs, target_lcs], doc
+            )
+            self.assertEqual(resolved, (source, source_lcs, target_lcs))
+            inferred = resolve_lcs_placement_selection(
+                [target_lcs, source_lcs], doc
+            )
+            self.assertEqual(inferred, (source, source_lcs, target_lcs))
+
+            other, _other_base = _sheet_part(
+                doc, "SelectionOther", Part.makeBox(3.0, 3.0, 1.0)
+            )
+            other_lcs = doc.addObject(
+                "Part::LocalCoordinateSystem", "SelectionOtherLCS"
+            )
+            other.addObject(other_lcs)
+            ordered = resolve_lcs_placement_selection(
+                [source_lcs, other_lcs], doc
+            )
+            self.assertEqual(ordered, (source, source_lcs, other_lcs))
+            explicit = resolve_lcs_placement_selection(
+                [source, other_lcs, source_lcs], doc
+            )
+            self.assertEqual(explicit, (source, source_lcs, other_lcs))
+
+            with self.assertRaisesRegex(ValueError, "exactly two"):
+                resolve_lcs_placement_selection([source_lcs], doc)
+            with self.assertRaisesRegex(ValueError, "at most one"):
+                resolve_lcs_placement_selection(
+                    [source, other, source_lcs, other_lcs], doc
+                )
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_placed_seed_patterns_and_local_follow_on_frame(self):
+        doc = App.newDocument("PlacedSeedPattern")
+        try:
+            source, _source_base = _sheet_part(
+                doc,
+                "PlacedPatternSource",
+                Part.makeBox(2.0, 2.0, 2.0),
+            )
+            target, _target_base = _sheet_part(
+                doc,
+                "PlacedPatternTarget",
+                Part.makeBox(50.0, 50.0, 2.0),
+                App.Placement(App.Vector(-25.0, -25.0, 10.0), App.Rotation()),
+            )
+            source_lcs = doc.addObject("Part::Feature", "PlacedSourceFrame")
+            source.addObject(source_lcs)
+            target_lcs = doc.addObject("Part::Feature", "PlacedTargetFrame")
+            target_lcs.Placement = App.Placement(
+                App.Vector(10.0, 20.0, 0.0), App.Rotation()
+            )
+            placement, placed_link = create_lcs_placed_part(
+                doc, source, source_lcs, target_lcs
+            )
+            sketch = doc.addObject("Sketcher::SketchObject", "PlacedLocator")
+            sketch.addGeometry(Part.Point(App.Vector(1.0, 1.0, 0.0)), False)
+            source.addObject(sketch)
+            connection, _cuts = create_bolted_connection(
+                doc,
+                [(sketch, [])],
+                [source, target],
+                locator_occurrence=placed_link,
+            )
+
+            radial, radial_link, _radial_cuts = create_connected_part_pattern(
+                doc,
+                source,
+                [connection],
+                "Polar",
+                seed_placement=placement,
+            )
+            radial.Occurrences = 2
+            radial.PolarCenter = App.Vector(0.0, 0.0, 0.0)
+            radial.PolarAxis = App.Vector(0.0, 0.0, 1.0)
+            radial.TotalAngle = 360.0
+            radial.Closed = True
+
+            linear, linear_link, _linear_cuts = create_connected_part_pattern(
+                doc,
+                source,
+                [connection],
+                "Linear",
+                parent_pattern=radial,
+            )
+            linear.TransformFrame = "Each Seed Occurrence"
+            linear.Occurrences = 2
+            linear.LinearDirection = App.Vector(1.0, 0.0, 0.0)
+            linear.Spacing = 5.0
+            doc.recompute()
+
+            radial_transforms = pattern_transforms(radial, include_seed=True)
+            self.assertEqual(len(radial_transforms), 2)
+            self.assertTrue(
+                radial_transforms[0].Base.isEqual(
+                    placed_link.LinkPlacement.Base, 1.0e-9
+                )
+            )
+            self.assertEqual(radial_link.ElementCount, 1)
+
+            transforms = pattern_transforms(linear, include_seed=True)
+            self.assertEqual(len(transforms), 4)
+            self.assertEqual(linear_link.ElementCount, 2)
+            self.assertTrue(
+                transforms[2].Base.isEqual(App.Vector(15.0, 20.0, 0.0), 1.0e-9)
+            )
+            self.assertTrue(
+                transforms[3].Base.isEqual(App.Vector(-15.0, -20.0, 0.0), 1.0e-9)
+            )
+            self.assertEqual(list(connection.OccurrenceProviders), [linear])
+
+            set_parent_pattern(linear, None)
+            set_seed_placement(linear, placement)
+            doc.recompute()
+            self.assertIs(linear.SeedPlacementReference, placement)
+            self.assertIsNone(linear.ParentPatternReference)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_pattern_controller_owns_generated_link_as_child(self):
+        doc = App.newDocument("ConnectedPatternChildOutput")
+        try:
+            source, _source_base = _sheet_part(
+                doc,
+                "ChildSource",
+                Part.makeBox(4.0, 4.0, 2.0),
+            )
+            target, _target_base = _sheet_part(
+                doc,
+                "ChildTarget",
+                Part.makeBox(20.0, 20.0, 2.0),
+                App.Placement(App.Vector(0.0, 0.0, 6.0), App.Rotation()),
+            )
+            sketch = doc.addObject("Sketcher::SketchObject", "ChildLocator")
+            sketch.addGeometry(Part.Point(App.Vector(1.0, 1.0, 0.0)), False)
+            connection, _cuts = create_bolted_connection(
+                doc, [(sketch, [])], [source, target]
+            )
+            pattern, link, _pattern_cuts = create_connected_part_pattern(
+                doc, source, [connection], "Linear"
+            )
+
+            self.assertEqual(
+                pattern.getTypeIdOfProperty("InstanceLink"),
+                "App::PropertyLinkChild",
+            )
+            self.assertIs(pattern.InstanceLink, link)
+            self.assertIn(link, pattern.OutList)
+            self.assertIn(pattern, link.InList)
+            self.assertNotIn(link, doc.ConnectedPartPatterns.Group)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_null_pattern_proxy_and_legacy_grouped_link_are_repaired(self):
+        doc = App.newDocument("ConnectedPatternProxyRepair")
+        try:
+            source, _source_base = _sheet_part(
+                doc,
+                "RepairSource",
+                Part.makeBox(4.0, 4.0, 2.0),
+            )
+            target, _target_base = _sheet_part(
+                doc,
+                "RepairTarget",
+                Part.makeBox(20.0, 20.0, 2.0),
+                App.Placement(App.Vector(0.0, 0.0, 6.0), App.Rotation()),
+            )
+            sketch = doc.addObject("Sketcher::SketchObject", "RepairLocator")
+            sketch.addGeometry(Part.Point(App.Vector(1.0, 1.0, 0.0)), False)
+            connection, _cuts = create_bolted_connection(
+                doc, [(sketch, [])], [source, target]
+            )
+            pattern, link, _pattern_cuts = create_connected_part_pattern(
+                doc, source, [connection], "Linear"
+            )
+            pattern.InstanceLink = None
+            doc.ConnectedPartPatterns.addObject(link)
+            pattern.Proxy = None
+
+            repaired = repair_connected_part_patterns(doc)
+
+            self.assertEqual(repaired, [pattern])
+            self.assertIsInstance(pattern.Proxy, SMConnectedPartPattern)
+            self.assertIs(pattern.InstanceLink, link)
+            self.assertNotIn(link, doc.ConnectedPartPatterns.Group)
+            self.assertIn(pattern, link.InList)
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_legacy_pattern_cut_nodes_are_removed_and_links_rewired(self):
         doc = App.newDocument("ConnectedPatternLegacyMigration")
         try:
@@ -482,6 +756,33 @@ class TestConnectedPattern(unittest.TestCase):
                 moved_center.isEqual(App.Vector(9.0, 10.0, 15.0), 1e-9)
             )
             self.assertTrue(moved_axis.isEqual(axis, 1e-9))
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_deactivated_lcs_axes_include_the_lcs_placement(self):
+        doc = App.newDocument("ConnectedPatternLCSAxis")
+        try:
+            coordinate_system = doc.addObject(
+                "Part::LocalCoordinateSystem", "PlacedCoordinates"
+            )
+            coordinate_system.Placement = App.Placement(
+                App.Vector(5.0, 7.0, 11.0),
+                App.Rotation(App.Vector(0.0, 0.0, 1.0), 90.0),
+            )
+            pattern = doc.addObject("App::FeaturePython", "Pattern")
+            SMConnectedPartPattern(pattern)
+            pattern.AxisReference = (coordinate_system.OriginFeatures[2], [""])
+            center, axis = polar_axis_definition(pattern)
+            self.assertTrue(center.isEqual(App.Vector(5.0, 7.0, 11.0), 1.0e-9))
+            self.assertTrue(axis.isEqual(App.Vector(0.0, 0.0, 1.0), 1.0e-9))
+
+            pattern.PatternType = "Linear"
+            pattern.LinearDirectionReference = (
+                coordinate_system.OriginFeatures[0],
+                [""],
+            )
+            direction = linear_direction_definition(pattern)
+            self.assertTrue(direction.isEqual(App.Vector(0.0, 1.0, 0.0), 1.0e-9))
         finally:
             App.closeDocument(doc.Name)
 

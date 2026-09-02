@@ -563,10 +563,48 @@ def make_hole_cutter(hole_type, center, x_axis, z_axis, width, slot_length, dept
 
 def connection_for_cut(cut):
     """Resolve a cut's owner without an invalid cross-Body PropertyLink."""
+    dependency = getattr(cut, "ConnectionDependency", None)
+    if dependency is not None:
+        return dependency
     name = str(getattr(cut, "ConnectionName", ""))
     if name:
         return cut.Document.getObject(name)
     return getattr(cut, "Connection", None)
+
+
+def _sync_cut_dependencies(cut, connection=None):
+    """Publish acyclic recompute dependencies for one participant cut.
+
+    A patterned connection points to its occurrence provider, and that provider
+    points back to the repeated source part.  Linking the source part's own cut
+    to the connection would therefore close a graph cycle.  That definition
+    cut depends directly on the locator sketches instead.  Cuts in the other
+    participant parts can safely depend on the connection and thereby run
+    after both the sketches and occurrence patterns in one recompute pass.
+    """
+    if connection is None:
+        name = str(getattr(cut, "ConnectionName", ""))
+        connection = cut.Document.getObject(name) if name else None
+    if "LocatorDependencies" in cut.PropertiesList:
+        locator_dependencies = (
+            [sketch for sketch, _sub_names in connection.LocatorReferences]
+            if connection is not None
+            else []
+        )
+        if list(cut.LocatorDependencies) != locator_dependencies:
+            cut.LocatorDependencies = locator_dependencies
+    if "ConnectionDependency" not in cut.PropertiesList:
+        return
+    providers = _locator_occurrences(connection) if connection is not None else []
+    is_pattern_definition = bool(providers) and (
+        str(getattr(cut, "OccurrenceScope", "All Occurrences"))
+        == "Definition Only"
+        or str(getattr(cut, "ParticipantName", ""))
+        == str(getattr(connection, "OccurrenceSourceName", ""))
+    )
+    desired_connection = None if is_pattern_definition else connection
+    if getattr(cut, "ConnectionDependency", None) is not desired_connection:
+        cut.ConnectionDependency = desired_connection
 
 
 def _effective_fit(cut):
@@ -641,6 +679,189 @@ def _nearest_material(cutter, base_shape, center):
     return Part.makeCompound(nearest)
 
 
+def _shape_cache_signature(shape):
+    """Return a cheap geometry signature for simple generated cutter solids."""
+    box = shape.BoundBox
+    vertices = sorted(
+        (vertex.Point.x, vertex.Point.y, vertex.Point.z)
+        for vertex in shape.Vertexes
+    )
+    return (
+        shape.ShapeType,
+        shape.Volume,
+        box.XMin,
+        box.YMin,
+        box.ZMin,
+        box.XMax,
+        box.YMax,
+        box.ZMax,
+        tuple(vertices),
+    )
+
+
+def _source_shape_cache_token(shape):
+    """Identify one live upstream shape without serializing its full BREP."""
+    box = shape.BoundBox
+    return (
+        shape.hashCode(),
+        shape.Volume,
+        box.XMin,
+        box.YMin,
+        box.ZMin,
+        box.XMax,
+        box.YMax,
+        box.ZMax,
+        len(shape.Solids),
+        len(shape.Faces),
+    )
+
+
+def _vector_cache_signature(vector):
+    # Solver/recompute order can introduce sub-nanometre floating noise in an
+    # otherwise identical locator frame.  Match the placement-key precision so
+    # that noise does not invalidate a complete Boolean result cache.
+    return tuple(round(value, 9) for value in (vector.x, vector.y, vector.z))
+
+
+def _nearest_spans_from_parameters(parameters):
+    """Resolve nearest expanded material intervals from axis crossings."""
+    tolerance = max(SheetMetalTools.smEpsilon * 10.0, 1.0e-7)
+    parameters = sorted(parameters)
+    unique = []
+    for parameter in parameters:
+        if not unique or abs(parameter - unique[-1]) > tolerance:
+            unique.append(parameter)
+    # ``_feature_depth`` puts both line endpoints outside the shape's bounding
+    # box.  A clean transversal section of closed, non-overlapping solids must
+    # therefore alternate entry/exit vertices.  Pairing those vertices avoids
+    # hundreds of comparatively expensive ``isInside`` classifications during
+    # a patterned connection recompute.  Odd crossing counts indicate a
+    # degenerate/tangent result, so retain the exact-solid fallback for it.
+    if len(unique) % 2:
+        return []
+    intervals = [
+        (unique[index], unique[index + 1])
+        for index in range(0, len(unique), 2)
+        if unique[index + 1] - unique[index] > tolerance
+    ]
+    if not intervals:
+        return []
+
+    def distance(interval):
+        lower, upper = interval
+        if lower <= 0.0 <= upper:
+            return 0.0
+        return min(abs(lower), abs(upper))
+
+    nearest_distance = min(distance(interval) for interval in intervals)
+    nearest_indexes = [
+        index
+        for index, interval in enumerate(intervals)
+        if distance(interval) <= nearest_distance + tolerance
+    ]
+    expanded = []
+    for index in nearest_indexes:
+        lower, upper = intervals[index]
+        lower_margin = CUTTER_MARGIN
+        upper_margin = CUTTER_MARGIN
+        # Do not let the robustness margin reach a neighbouring sheet layer.
+        # Forty-five percent leaves a small gap even after OCC tolerances are
+        # considered, while exposed faces retain the normal cutter margin.
+        if index:
+            lower_margin = min(
+                lower_margin,
+                max(0.0, 0.45 * (lower - intervals[index - 1][1])),
+            )
+        if index + 1 < len(intervals):
+            upper_margin = min(
+                upper_margin,
+                max(0.0, 0.45 * (intervals[index + 1][0] - upper)),
+            )
+        expanded.append((lower - lower_margin, upper + upper_margin))
+    return expanded
+
+
+def _nearest_material_spans(base_shape, center, direction, depth):
+    """Return the nearest material intervals along a locator axis.
+
+    Intersecting a full 3D hole cutter with a folded part is comparatively
+    expensive.  A line/shape section is enough to discover the entry and exit
+    positions of the local sheet layers.  The caller can then build a short
+    cutter around only the nearest interval.  Ambiguous equally-near layers
+    are retained to match ``_nearest_material`` semantics.
+    """
+    axis = _unit(direction, "A hole locator has no usable axis.")
+    half_depth = max(float(depth) * 0.5, CUTTER_MARGIN)
+    line = Part.makeLine(
+        center.sub(_scaled(axis, half_depth)),
+        center.add(_scaled(axis, half_depth)),
+    )
+    section = base_shape.section(line)
+    # A coincident/tangent section can contain edges rather than clean crossing
+    # vertices.  Let the established exact-solid fallback handle that case.
+    if section.Edges:
+        return []
+    return _nearest_spans_from_parameters(
+        (vertex.Point.sub(center)).dot(axis) for vertex in section.Vertexes
+    )
+
+
+def _nearest_material_spans_batch(base_shape, queries):
+    """Resolve many locator axes with one OCC section operation."""
+    if not queries:
+        return []
+    axes = [
+        _unit(direction, "A hole locator has no usable axis.")
+        for _center, direction, _depth in queries
+    ]
+    half_depths = [
+        max(float(depth) * 0.5, CUTTER_MARGIN)
+        for _center, _direction, depth in queries
+    ]
+    lines = [
+        Part.makeLine(
+            center.sub(_scaled(axis, half_depth)),
+            center.add(_scaled(axis, half_depth)),
+        )
+        for (center, _direction, _depth), axis, half_depth in zip(
+            queries, axes, half_depths
+        )
+    ]
+    section = base_shape.section(
+        lines[0] if len(lines) == 1 else Part.makeCompound(lines)
+    )
+    if section.Edges:
+        return [
+            _nearest_material_spans(base_shape, center, direction, depth)
+            for center, direction, depth in queries
+        ]
+    tolerance = max(SheetMetalTools.smEpsilon * 100.0, 1.0e-6)
+    parameters = [[] for _query in queries]
+    for vertex in section.Vertexes:
+        point = vertex.Point
+        for index, ((center, _direction, _depth), axis, half_depth) in enumerate(
+            zip(queries, axes, half_depths)
+        ):
+            delta = point.sub(center)
+            parameter = delta.dot(axis)
+            if abs(parameter) > half_depth + tolerance:
+                continue
+            perpendicular = delta.sub(_scaled(axis, parameter))
+            if perpendicular.Length <= tolerance:
+                parameters[index].append(parameter)
+    return [
+        _nearest_spans_from_parameters(axis_parameters)
+        for axis_parameters in parameters
+    ]
+
+
+def _cutter_record_parts(record):
+    """Read legacy pairs and optimized ``(cutter, center, prepared)`` records."""
+    cutter, center = record[:2]
+    prepared = bool(record[2]) if len(record) > 2 else False
+    return cutter, center, prepared
+
+
 def apply_hole_cutter(base_shape, cutter, center, cut_extent):
     """Apply a through-part or nearest-local-layer hole cutter."""
     if str(cut_extent) == "Through Entire Part":
@@ -659,7 +880,8 @@ def apply_hole_cutters(
 ):
     """Apply many independent hole cutters in one final Boolean operation.
 
-    ``cutter_records`` contains ``(cutter, center)`` pairs.  Pattern cuts can
+    ``cutter_records`` contains ``(cutter, center)`` pairs or optimized
+    ``(cutter, center, prepared)`` triples. Pattern cuts can
     rely on their bounding-box broad phase for through cuts, avoiding one OCC
     common operation per possible hole.  Closest-layer cuts still resolve the
     local material for every locator before batching the final subtraction.
@@ -673,8 +895,8 @@ def apply_hole_cutters(
     )
     if not prepared:
         return base_shape.copy(), skipped
-    tool = prepared[0] if len(prepared) == 1 else Part.makeCompound(prepared)
-    return base_shape.cut(tool), skipped
+    tools = prepared[0] if len(prepared) == 1 else tuple(prepared)
+    return base_shape.cut(tools), skipped
 
 
 def prepare_hole_cutters(
@@ -688,13 +910,16 @@ def prepare_hole_cutters(
     prepared = []
     skipped = 0
     through_entire_part = str(cut_extent) == "Through Entire Part"
-    for cutter, center in cutter_records:
+    for record in cutter_records:
+        cutter, center, nearest_prepared = _cutter_record_parts(record)
         try:
             if through_entire_part:
                 if validate_through and not base_shape.common(cutter).Solids:
                     raise ValueError(
                         "Bolt locator does not intersect this participant."
                     )
+                prepared.append(cutter)
+            elif nearest_prepared:
                 prepared.append(cutter)
             else:
                 prepared.append(_nearest_material(cutter, base_shape, center))
@@ -800,13 +1025,27 @@ def _connection_cut_chain(cut):
 
 
 def _set_cut_passthrough(cut, base):
-    cut.Shape = base.Shape.copy() if base is not None else Part.Shape()
-    cut.RemovedVolume = 0.0
+    result = base.Shape.copy() if base is not None else Part.Shape()
+    source_token = (
+        _source_shape_cache_token(base.Shape) if base is not None else None
+    )
+    if (
+        cut.Shape.isNull()
+        or getattr(cut.Proxy, "_passthrough_source_token", None)
+        != source_token
+    ):
+        cut.Shape = result
+        cut.Proxy._passthrough_source_token = source_token
+    if abs(float(cut.RemovedVolume)) > 1.0e-12:
+        cut.RemovedVolume = 0.0
     if "SkippedLocationCount" in cut.PropertiesList:
-        cut.SkippedLocationCount = 0
+        if cut.SkippedLocationCount != 0:
+            cut.SkippedLocationCount = 0
     if "AggregateContributorCount" in cut.PropertiesList:
-        cut.AggregateContributorCount = 0
-    cut.LastError = ""
+        if cut.AggregateContributorCount != 0:
+            cut.AggregateContributorCount = 0
+    if cut.LastError:
+        cut.LastError = ""
 
 
 def execute_aggregate_connection_cut(cut):
@@ -818,13 +1057,19 @@ def execute_aggregate_connection_cut(cut):
     """
     base = _cut_base_feature(cut)
     if base is None or base.Shape.isNull():
-        cut.Shape = Part.Shape()
-        cut.RemovedVolume = 0.0
+        if not cut.Shape.isNull():
+            cut.Shape = Part.Shape()
+        if abs(float(cut.RemovedVolume)) > 1.0e-12:
+            cut.RemovedVolume = 0.0
         if "SkippedLocationCount" in cut.PropertiesList:
-            cut.SkippedLocationCount = 0
+            if cut.SkippedLocationCount != 0:
+                cut.SkippedLocationCount = 0
         if "AggregateContributorCount" in cut.PropertiesList:
-            cut.AggregateContributorCount = 0
-        cut.LastError = "Previous feature is missing or has no shape."
+            if cut.AggregateContributorCount != 0:
+                cut.AggregateContributorCount = 0
+        message = "Previous feature is missing or has no shape."
+        if cut.LastError != message:
+            cut.LastError = message
         return
     if _connection_cut_successor(cut) is not None:
         _set_cut_passthrough(cut, base)
@@ -838,8 +1083,10 @@ def execute_aggregate_connection_cut(cut):
         ):
             raise ValueError("The aggregate connection base is missing or empty.")
         base_shape = aggregate_base.Shape.copy()
+        base_cache_token = _source_shape_cache_token(aggregate_base.Shape)
         initial_volume = base_shape.Volume
         prepared = []
+        prepared_cache_keys = []
         skipped = 0
         for contributor in contributors:
             collector = getattr(contributor.Proxy, "collect_cutter_batches", None)
@@ -850,7 +1097,9 @@ def execute_aggregate_connection_cut(cut):
                     )
                 )
             try:
-                batches, broad_phase_skipped = collector(contributor, base_shape)
+                batches, broad_phase_skipped = collector(
+                    contributor, base_shape, base_cache_token
+                )
                 skipped += broad_phase_skipped
                 for batch in batches:
                     tools, exact_skipped = prepare_hole_cutters(
@@ -861,35 +1110,85 @@ def execute_aggregate_connection_cut(cut):
                         validate_through=batch["validate_through"],
                     )
                     prepared.extend(tools)
+                    prepared_cache_keys.append(
+                        batch.get("cache_key")
+                        or tuple(_shape_cache_signature(tool) for tool in tools)
+                    )
                     skipped += exact_skipped
             except (ValueError, Part.OCCError) as error:
                 raise ValueError("{}: {}".format(contributor.Label, error))
-        result = base_shape
+        refine = any(
+            bool(getattr(contributor, "Refine", False))
+            for contributor in contributors
+        )
+        cache_key = None
+        cached_result = None
         if prepared:
-            tool = prepared[0] if len(prepared) == 1 else Part.makeCompound(prepared)
-            result = base_shape.cut(tool)
-        if any(bool(getattr(contributor, "Refine", False)) for contributor in contributors):
-            result = result.removeSplitter()
-        if result.isNull() or not result.isValid():
-            raise ValueError("The aggregate connection cut produced an invalid shape.")
-        cut.Shape = result
-        cut.RemovedVolume = max(0.0, initial_volume - result.Volume)
+            cache_key = (
+                base_cache_token,
+                tuple(prepared_cache_keys),
+                refine,
+            )
+            if getattr(cut.Proxy, "_aggregate_cache_key", None) == cache_key:
+                cached_result = getattr(cut.Proxy, "_aggregate_cache_result", None)
+        cache_hit = cached_result is not None and not cached_result.isNull()
+        if cache_hit:
+            result = cached_result.copy()
+        else:
+            result = base_shape
+            if prepared:
+                tools = prepared[0] if len(prepared) == 1 else tuple(prepared)
+                result = base_shape.cut(tools)
+            if refine:
+                result = result.removeSplitter()
+            if result.isNull() or not result.isValid():
+                raise ValueError("The aggregate connection cut produced an invalid shape.")
+            if cache_key is not None:
+                cut.Proxy._aggregate_cache_key = cache_key
+                cut.Proxy._aggregate_cache_result = result.copy()
+        if not cache_hit or cut.Shape.isNull():
+            cut.Shape = result
+        removed_volume = max(0.0, initial_volume - result.Volume)
+        if abs(float(cut.RemovedVolume) - removed_volume) > 1.0e-12:
+            cut.RemovedVolume = removed_volume
         if "SkippedLocationCount" in cut.PropertiesList:
-            cut.SkippedLocationCount = skipped
+            if cut.SkippedLocationCount != skipped:
+                cut.SkippedLocationCount = skipped
         if "AggregateContributorCount" in cut.PropertiesList:
-            cut.AggregateContributorCount = len(contributors)
-        cut.LastError = ""
+            contributor_count = len(contributors)
+            if cut.AggregateContributorCount != contributor_count:
+                cut.AggregateContributorCount = contributor_count
+        if cut.LastError:
+            cut.LastError = ""
     except (ValueError, Part.OCCError) as error:
         cut.Shape = base.Shape.copy()
-        cut.RemovedVolume = 0.0
+        if abs(float(cut.RemovedVolume)) > 1.0e-12:
+            cut.RemovedVolume = 0.0
         if "SkippedLocationCount" in cut.PropertiesList:
-            cut.SkippedLocationCount = 0
+            if cut.SkippedLocationCount != 0:
+                cut.SkippedLocationCount = 0
         if "AggregateContributorCount" in cut.PropertiesList:
-            cut.AggregateContributorCount = 0
-        cut.LastError = str(error)
-        FreeCAD.Console.PrintError(
-            "Aggregate connection cut {}: {}\n".format(cut.Label, error)
+            if cut.AggregateContributorCount != 0:
+                cut.AggregateContributorCount = 0
+        message = str(error)
+        if cut.LastError != message:
+            cut.LastError = message
+        connection = connection_for_cut(cut)
+        transient_recompute = (
+            "does not intersect" in str(error)
+            and connection is not None
+            and "Touched" in connection.State
         )
+        # Patterned source cuts cannot link back to their connection without
+        # closing a dependency cycle.  During a configuration change FreeCAD
+        # may therefore evaluate that source cut once while the connection is
+        # still in flight, then evaluate it again later in the same recompute.
+        # Keep LastError available for diagnostics, but do not emit a false
+        # report-view error for that known transient pass.
+        if not transient_recompute:
+            FreeCAD.Console.PrintError(
+                "Aggregate connection cut {}: {}\n".format(cut.Label, error)
+            )
 
 
 def _locator_intersects_feature(feature, world_frame):
@@ -1128,10 +1427,14 @@ class SMBoltConnection:
         try:
             occurrences = _locator_occurrences(fp)
             if not occurrences:
-                fp.OccurrenceParticipantName = ""
-                fp.OccurrenceParticipantLabel = ""
-                fp.OccurrenceSourceName = ""
-                fp.OccurrenceState = "Definition coordinates"
+                if str(fp.OccurrenceParticipantName):
+                    fp.OccurrenceParticipantName = ""
+                if str(fp.OccurrenceParticipantLabel):
+                    fp.OccurrenceParticipantLabel = ""
+                if str(fp.OccurrenceSourceName):
+                    fp.OccurrenceSourceName = ""
+                if str(fp.OccurrenceState) != "Definition coordinates":
+                    fp.OccurrenceState = "Definition coordinates"
             else:
                 sources = [_linked_sheet_metal_part(item) for item in occurrences]
                 if any(source is None for source in sources):
@@ -1140,34 +1443,68 @@ class SMBoltConnection:
                     raise ValueError("All occurrence providers must repeat the same part.")
                 source_part = sources[0]
                 transforms = _connection_occurrence_transforms(fp)
-                fp.OccurrenceParticipantName = ",".join(
+                participant_name = ",".join(
                     occurrence.Name for occurrence in occurrences
                 )
-                fp.OccurrenceParticipantLabel = ", ".join(
+                participant_label = ", ".join(
                     occurrence.Label for occurrence in occurrences
                 )
-                fp.OccurrenceSourceName = source_part.Name
-                fp.OccurrenceState = "Resolved {} occurrence(s) from {} ({})".format(
-                    len(transforms), fp.OccurrenceParticipantLabel, fp.OccurrenceMode
+                occurrence_state = "Resolved {} occurrence(s) from {} ({})".format(
+                    len(transforms), participant_label, fp.OccurrenceMode
                 )
+                if str(fp.OccurrenceParticipantName) != participant_name:
+                    fp.OccurrenceParticipantName = participant_name
+                if str(fp.OccurrenceParticipantLabel) != participant_label:
+                    fp.OccurrenceParticipantLabel = participant_label
+                if str(fp.OccurrenceSourceName) != source_part.Name:
+                    fp.OccurrenceSourceName = source_part.Name
+                if str(fp.OccurrenceState) != occurrence_state:
+                    fp.OccurrenceState = occurrence_state
             records = locator_records(fp)
             hole_only = set(fp.HoleOnlyLocatorKeys)
-            fp.LocatorCount = len(records)
-            fp.AuxiliaryHoleCount = sum(
+            locator_count = len(records)
+            auxiliary_hole_count = sum(
                 record["key"] in hole_only for record in records
             )
-            fp.BoltCount = fp.LocatorCount - fp.AuxiliaryHoleCount
+            bolt_count = locator_count - auxiliary_hole_count
+            if int(fp.LocatorCount) != locator_count:
+                fp.LocatorCount = locator_count
+            if int(fp.AuxiliaryHoleCount) != auxiliary_hole_count:
+                fp.AuxiliaryHoleCount = auxiliary_hole_count
+            if int(fp.BoltCount) != bolt_count:
+                fp.BoltCount = bolt_count
             if fp.CutFeatureNames:
                 sync_common_participants(fp)
                 for cut in connection_cuts(fp):
-                    cut.touch()
-            fp.LastError = ""
+                    _sync_cut_dependencies(cut, fp)
+            if str(fp.LastError):
+                fp.LastError = ""
         except (ValueError, Part.OCCError) as error:
-            fp.BoltCount = 0
-            fp.LocatorCount = 0
-            fp.AuxiliaryHoleCount = 0
-            fp.LastError = str(error)
+            if int(fp.BoltCount):
+                fp.BoltCount = 0
+            if int(fp.LocatorCount):
+                fp.LocatorCount = 0
+            if int(fp.AuxiliaryHoleCount):
+                fp.AuxiliaryHoleCount = 0
+            if str(fp.LastError) != str(error):
+                fp.LastError = str(error)
             FreeCAD.Console.PrintError("Bolted connection: {}\n".format(error))
+
+    def onChanged(self, fp, prop):
+        if prop not in {
+            "LocatorReferences",
+            "LocatorGeometryFilter",
+            "HoleOnlyLocatorKeys",
+            "ConnectionType",
+            "BoltSize",
+            "Fit",
+            "OccurrenceProviders",
+            "OccurrenceMode",
+        }:
+            return
+        for cut in connection_cuts(fp):
+            _sync_cut_dependencies(cut, fp)
+            cut.touch()
 
     def onDocumentRestored(self, fp):
         self.addVerifyProperties(fp)
@@ -1190,6 +1527,7 @@ class SMBoltConnectionCut:
             obj.ParticipantLabel = participant.Label
         obj.Role = role
         obj.HoleType = hole_type
+        _sync_cut_dependencies(obj, connection)
         obj.Proxy = self
 
     def addVerifyProperties(self, obj):
@@ -1212,6 +1550,28 @@ class SMBoltConnectionCut:
             obj.setEditorMode("ConnectionName", 1)
         if legacy_connection is not None:
             obj.ConnectionName = legacy_connection.Name
+        if "ConnectionDependency" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyLinkGlobal",
+                "ConnectionDependency",
+                "Bolted Connection Cut",
+                translate(
+                    "App::Property",
+                    "Recompute dependency on the bolted connection definition",
+                ),
+            )
+            obj.setEditorMode("ConnectionDependency", 2)
+        if "LocatorDependencies" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyLinkListGlobal",
+                "LocatorDependencies",
+                "Bolted Connection Cut",
+                translate(
+                    "App::Property",
+                    "Recompute dependencies on the source locator sketches",
+                ),
+            )
+            obj.setEditorMode("LocatorDependencies", 2)
         if "PreviousFeature" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyLink", "PreviousFeature", "Bolted Connection Cut",
@@ -1361,8 +1721,9 @@ class SMBoltConnectionCut:
                 translate("App::Property", "Participant cut or validation state"),
             )
             obj.setEditorMode("ValidationState", 1)
+        _sync_cut_dependencies(obj)
 
-    def collect_cutter_batches(self, fp, base_shape):
+    def collect_cutter_batches(self, fp, base_shape, base_cache_token=None):
         connection = connection_for_cut(fp)
         if connection is None:
             raise ValueError("The bolted connection reference is missing.")
@@ -1380,9 +1741,41 @@ class SMBoltConnectionCut:
             any(_is_pattern_occurrence_provider(item) for item in providers)
             and str(fp.OccurrenceScope) == "All Occurrences"
         )
-        for record in cut_locator_records(fp):
-            world_frame = record["frame"]
-            local = _local_frame(fp, world_frame)
+        resolved_records = [
+            (record, _local_frame(fp, record["frame"]))
+            for record in cut_locator_records(fp)
+        ]
+        if base_cache_token is None:
+            base_cache_token = _source_shape_cache_token(base_shape)
+        batch_cache_key = (
+            base_cache_token,
+            cut_mode,
+            str(fp.HoleType),
+            width,
+            slot_length,
+            rotation,
+            str(fp.CutExtent),
+            str(fp.OccurrenceScope),
+            skip_non_intersections,
+            tuple(
+                (
+                    record["key"],
+                    _vector_cache_signature(local["point"]),
+                    _vector_cache_signature(local["x_axis"]),
+                    _vector_cache_signature(local["z_axis"]),
+                )
+                for record, local in resolved_records
+            ),
+        )
+        if getattr(self, "_cutter_batch_cache_key", None) == batch_cache_key:
+            cached = getattr(self, "_cutter_batch_cache_value", None)
+            if cached is not None:
+                state = "Existing holes confirmed" if cut_mode == "Existing Holes" else "Cut"
+                if str(fp.ValidationState) != state:
+                    fp.ValidationState = state
+                return cached
+        active_records = []
+        for _record, local in resolved_records:
             x_axis = local["x_axis"]
             if str(fp.HoleType) != "Round" and abs(rotation) > 1.0e-14:
                 y_axis = _unit(
@@ -1407,20 +1800,49 @@ class SMBoltConnectionCut:
                 skipped += 1
                 continue
             depth = _feature_depth(base_shape, local["point"])
-            cutter = make_hole_cutter(
-                fp.HoleType,
-                local["point"],
-                x_axis,
-                local["z_axis"],
-                width,
-                slot_length,
-                depth,
+            active_records.append((local, x_axis, depth))
+        if str(fp.CutExtent) == "Nearest Sheet Layer":
+            span_sets = _nearest_material_spans_batch(
+                base_shape,
+                [
+                    (local["point"], local["z_axis"], depth)
+                    for local, _x_axis, depth in active_records
+                ],
             )
-            cutter_records.append((cutter, local["point"]))
+        else:
+            span_sets = [[] for _item in active_records]
+        for (local, x_axis, depth), spans in zip(active_records, span_sets):
+            if spans:
+                for lower, upper in spans:
+                    cutter_center = local["point"].add(
+                        _scaled(local["z_axis"], 0.5 * (lower + upper))
+                    )
+                    cutter = make_hole_cutter(
+                        fp.HoleType,
+                        cutter_center,
+                        x_axis,
+                        local["z_axis"],
+                        width,
+                        slot_length,
+                        upper - lower,
+                    )
+                    cutter_records.append((cutter, cutter_center, True))
+            else:
+                cutter = make_hole_cutter(
+                    fp.HoleType,
+                    local["point"],
+                    x_axis,
+                    local["z_axis"],
+                    width,
+                    slot_length,
+                    depth,
+                )
+                cutter_records.append((cutter, local["point"]))
         if cut_mode == "Existing Holes":
             obstructed = [
                 index
-                for index, (cutter, _center) in enumerate(cutter_records, start=1)
+                for index, record in enumerate(cutter_records, start=1)
+                for cutter, _center, _prepared in [_cutter_record_parts(record)]
                 if base_shape.common(cutter).Volume > 1.0e-7
             ]
             if obstructed:
@@ -1429,17 +1851,26 @@ class SMBoltConnectionCut:
                         ", ".join(str(index) for index in obstructed)
                     )
                 )
-            fp.ValidationState = "Existing holes confirmed"
-            return [], skipped
-        fp.ValidationState = "Cut"
-        return [
+            if str(fp.ValidationState) != "Existing holes confirmed":
+                fp.ValidationState = "Existing holes confirmed"
+            result = ([], skipped)
+            self._cutter_batch_cache_key = batch_cache_key
+            self._cutter_batch_cache_value = result
+            return result
+        if str(fp.ValidationState) != "Cut":
+            fp.ValidationState = "Cut"
+        result = ([
             {
                 "cut_extent": str(fp.CutExtent),
                 "records": cutter_records,
                 "skip_non_intersections": skip_non_intersections,
                 "validate_through": not skip_non_intersections,
+                "cache_key": batch_cache_key,
             }
-        ], skipped
+        ], skipped)
+        self._cutter_batch_cache_key = batch_cache_key
+        self._cutter_batch_cache_value = result
+        return result
 
     def execute(self, fp):
         self.addVerifyProperties(fp)
@@ -1500,11 +1931,12 @@ def set_connection_occurrence_providers(connection, providers, source_part=None)
         if provider is not None and provider not in unique:
             unique.append(provider)
     if not unique:
-        connection.OccurrenceProviders = []
+        if list(connection.OccurrenceProviders):
+            connection.OccurrenceProviders = []
         for cut in connection_cuts(connection):
-            cut.OccurrenceScope = "All Occurrences"
-            cut.touch()
-        connection.touch()
+            if str(cut.OccurrenceScope) != "All Occurrences":
+                cut.OccurrenceScope = "All Occurrences"
+            _sync_cut_dependencies(cut, connection)
         return
     resolved_sources = [
         _validate_locator_occurrence(
@@ -1521,15 +1953,31 @@ def set_connection_occurrence_providers(connection, providers, source_part=None)
         raise ValueError(
             "The occurrence provider does not repeat {}.".format(source_part.Label)
         )
-    connection.OccurrenceProviders = unique
-    connection.OccurrenceParticipantName = ",".join(item.Name for item in unique)
-    connection.OccurrenceParticipantLabel = ", ".join(item.Label for item in unique)
-    connection.OccurrenceSourceName = resolved_source.Name
+    topology_changed = list(connection.OccurrenceProviders) != unique
+    participant_name = ",".join(item.Name for item in unique)
+    participant_label = ", ".join(item.Label for item in unique)
+    source_name = resolved_source.Name
+    topology_changed = topology_changed or (
+        str(connection.OccurrenceParticipantName) != participant_name
+        or str(connection.OccurrenceParticipantLabel) != participant_label
+        or str(connection.OccurrenceSourceName) != source_name
+    )
+    if list(connection.OccurrenceProviders) != unique:
+        connection.OccurrenceProviders = unique
+    if str(connection.OccurrenceParticipantName) != participant_name:
+        connection.OccurrenceParticipantName = participant_name
+    if str(connection.OccurrenceParticipantLabel) != participant_label:
+        connection.OccurrenceParticipantLabel = participant_label
+    if str(connection.OccurrenceSourceName) != source_name:
+        connection.OccurrenceSourceName = source_name
     for cut in connection_cuts(connection):
         is_definition_part = cut.ParticipantName == resolved_source.Name
-        cut.OccurrenceScope = (
+        desired_scope = (
             "Definition Only" if is_definition_part else "All Occurrences"
         )
+        if str(cut.OccurrenceScope) != desired_scope:
+            cut.OccurrenceScope = desired_scope
+            topology_changed = True
         if (
             not is_definition_part
             and not cut.UseAllLocators
@@ -1538,9 +1986,10 @@ def set_connection_occurrence_providers(connection, providers, source_part=None)
             # A future target may miss every seed locator but intersect later
             # occurrences. Let broad-phase filtering decide which placements cut.
             cut.UseAllLocators = True
-        cut.touch()
-    set_default_participant_roles(connection)
-    connection.touch()
+            topology_changed = True
+        _sync_cut_dependencies(cut, connection)
+    if topology_changed:
+        set_default_participant_roles(connection)
 
 
 def set_connection_occurrence_provider(connection, provider, source_part=None):
@@ -1744,11 +2193,13 @@ def connection_cuts(connection):
 
 def sync_common_participants(connection):
     """Synchronize connection metadata from participant assignment modes."""
-    connection.CommonParticipantNames = [
+    names = [
         cut.ParticipantName
         for cut in connection_cuts(connection)
         if cut.UseAllLocators
     ]
+    if list(connection.CommonParticipantNames) != names:
+        connection.CommonParticipantNames = names
 
 
 def set_default_participant_roles(connection):
@@ -1758,26 +2209,35 @@ def set_default_participant_roles(connection):
     if occurrences and not any(
         _is_pattern_occurrence_provider(item) for item in occurrences
     ):
-        connection.OccurrenceRole = "Head Side"
+        if str(connection.OccurrenceRole) != "Head Side":
+            connection.OccurrenceRole = "Head Side"
         for cut in cuts:
-            cut.Role = "Nut Side"
-        connection.RoleDefaultsApplied = True
+            if str(cut.Role) != "Nut Side":
+                cut.Role = "Nut Side"
+        if not connection.RoleDefaultsApplied:
+            connection.RoleDefaultsApplied = True
         return
     common_names = set(connection.CommonParticipantNames)
     common_cuts = [cut for cut in cuts if cut.ParticipantName in common_names]
     if common_cuts:
         for index, cut in enumerate(common_cuts):
-            cut.Role = "Head Side" if index == 0 else "Intermediate"
+            role = "Head Side" if index == 0 else "Intermediate"
+            if str(cut.Role) != role:
+                cut.Role = role
         for cut in cuts:
             if cut.ParticipantName not in common_names:
-                cut.Role = "Nut Side"
+                if str(cut.Role) != "Nut Side":
+                    cut.Role = "Nut Side"
     else:
         assigned = [cut for cut in cuts if cut.UseAllLocators or cut.LocatorKeys]
         for cut in cuts:
-            cut.Role = "Nut Side"
+            if str(cut.Role) != "Nut Side":
+                cut.Role = "Nut Side"
         if assigned:
-            assigned[0].Role = "Head Side"
-    connection.RoleDefaultsApplied = True
+            if str(assigned[0].Role) != "Head Side":
+                assigned[0].Role = "Head Side"
+    if not connection.RoleDefaultsApplied:
+        connection.RoleDefaultsApplied = True
 
 
 def set_connection_type(connection, value):
@@ -1789,6 +2249,50 @@ def set_connection_type(connection, value):
             cut.HoleType = "Square"
         elif previous == "Carriage Bolt" and str(cut.HoleType) == "Square":
             cut.HoleType = "Round"
+
+
+def repair_bolt_connection_proxies(doc):
+    """Restore editable bolted-connection behavior after null-proxy saves."""
+    repaired = []
+    if doc is None:
+        return repaired
+    classes = {
+        "BoltConnection": SMBoltConnection,
+        "BoltConnectionCut": SMBoltConnectionCut,
+    }
+    for obj in doc.Objects:
+        cls = classes.get(str(getattr(obj, "SheetMetalType", "")))
+        if cls is None:
+            continue
+        proxy = getattr(obj, "Proxy", None)
+        if not isinstance(proxy, cls):
+            proxy = cls.__new__(cls)
+            obj.Proxy = proxy
+            obj.touch()
+            repaired.append(obj)
+        proxy.addVerifyProperties(obj)
+    return repaired
+
+
+class _BoltConnectionProxyObserver:
+    def slotActivateDocument(self, doc):
+        repair_bolt_connection_proxies(doc)
+
+    def slotRecomputedDocument(self, doc):
+        if any(
+            getattr(obj, "SheetMetalType", "")
+            in ("BoltConnection", "BoltConnectionCut")
+            and getattr(obj, "Proxy", None) is None
+            for obj in doc.Objects
+        ):
+            repair_bolt_connection_proxies(doc)
+
+
+if "_bolt_connection_proxy_observer" not in globals():
+    _bolt_connection_proxy_observer = _BoltConnectionProxyObserver()
+    FreeCAD.addDocumentObserver(_bolt_connection_proxy_observer)
+    for _open_document in FreeCAD.listDocuments().values():
+        repair_bolt_connection_proxies(_open_document)
 
 
 if SheetMetalTools.isGuiLoaded():
@@ -2492,6 +2996,7 @@ if SheetMetalTools.isGuiLoaded():
 
     class _BoltConnectionViewProviderObserver:
         def slotActivateDocument(self, doc):
+            repair_bolt_connection_proxies(doc)
             repair_bolt_connection_view_providers(doc)
 
 

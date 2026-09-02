@@ -30,6 +30,7 @@ import Part
 import SheetMetalTools
 from SheetMetalBoltConnectionCmd import (
     _find_sheet_metal_part,
+    _occurrence_delta_placement,
     _scaled,
     _target_tip,
     _unit,
@@ -46,6 +47,7 @@ translate = FreeCAD.Qt.translate
 icons_path = SheetMetalTools.icons_path
 
 PATTERN_TYPES = ["Polar", "Linear"]
+TRANSFORM_FRAMES = ["World", "Each Seed Occurrence"]
 
 
 def _set_enumeration(obj, name, values, default, group, description):
@@ -101,8 +103,30 @@ def _set_axis_reference(pattern, reference):
     pattern.AxisReference = None if reference is None else (reference, [""])
 
 
+def _reference_placement(reference):
+    """Resolve an axis placement, including its owning LCS when necessary.
+
+    FreeCAD's generated ``App::Line`` origin features do not consistently
+    include the placement of a deactivated LCS in ``getGlobalPlacement()``.
+    Their own ``Placement`` is always local to the LCS, so compose it
+    explicitly whenever that owner is available.
+    """
+    owner = next(
+        (
+            candidate
+            for candidate in reference.InList
+            if hasattr(candidate, "isDerivedFrom")
+            and candidate.isDerivedFrom("App::LocalCoordinateSystem")
+        ),
+        None,
+    )
+    if owner is not None:
+        return owner.getGlobalPlacement().multiply(reference.Placement)
+    return reference.getGlobalPlacement()
+
+
 def _reference_direction(reference):
-    placement = reference.getGlobalPlacement()
+    placement = _reference_placement(reference)
     local_direction = (
         FreeCAD.Vector(1.0, 0.0, 0.0)
         if getattr(reference, "TypeId", "") == "App::Line"
@@ -121,7 +145,7 @@ def polar_axis_definition(pattern):
         )
     if not _is_direction_reference(reference):
         raise ValueError("The polar axis reference is not an axis or datum line.")
-    placement = reference.getGlobalPlacement()
+    placement = _reference_placement(reference)
     return FreeCAD.Vector(placement.Base), _unit(
         _reference_direction(reference),
         "The selected datum line has no usable direction.",
@@ -172,6 +196,53 @@ def _parent_pattern(pattern):
     return reference
 
 
+def _seed_placement(pattern):
+    reference = getattr(pattern, "SeedPlacementReference", None)
+    if isinstance(reference, tuple):
+        return reference[0]
+    return reference
+
+
+def _placement_for_selection(obj):
+    """Resolve a placed-part controller from it or its owned App::Link."""
+    if getattr(obj, "SheetMetalType", "") == "LCSPlacedPart":
+        return obj
+    if getattr(obj, "TypeId", "") != "App::Link":
+        return None
+    return next(
+        (
+            parent
+            for parent in obj.InList
+            if getattr(parent, "SheetMetalType", "") == "LCSPlacedPart"
+            and _pattern_instance_link(parent) is obj
+        ),
+        None,
+    )
+
+
+def set_seed_placement(pattern, placement):
+    """Use one live LCS-placed occurrence as a root pattern's seed."""
+    if placement is None:
+        pattern.SeedPlacementReference = None
+        pattern.touch()
+        return
+    if getattr(placement, "SheetMetalType", "") != "LCSPlacedPart":
+        raise ValueError("Select an LCS-placed part occurrence as the seed.")
+    if placement.Document is not pattern.Document:
+        raise ValueError("The placed seed must be in the same document.")
+    source = _placed_source_part(placement)
+    if source is None or source.Name != pattern.SourcePartName:
+        raise ValueError(
+            "The placed occurrence must reference {}.".format(
+                pattern.SourcePartLabel
+            )
+        )
+    if _parent_pattern(pattern) is not None:
+        pattern.ParentPatternReference = None
+    pattern.SeedPlacementReference = placement
+    pattern.touch()
+
+
 def set_parent_pattern(pattern, parent):
     """Use *parent*'s complete occurrence set as *pattern*'s seed set.
 
@@ -202,6 +273,7 @@ def set_parent_pattern(pattern, parent):
             raise ValueError("The selected seed pattern already contains a cycle.")
         visited.add(current.Name)
         current = _parent_pattern(current)
+    pattern.SeedPlacementReference = None
     pattern.ParentPatternReference = (parent, [""])
     pattern.touch()
 
@@ -237,17 +309,29 @@ def _pattern_transforms(pattern, include_seed, visited):
     visited = set(visited)
     visited.add(pattern.Name)
     parent = _parent_pattern(pattern)
-    parent_transforms = (
-        _pattern_transforms(parent, True, visited)
-        if parent is not None
-        else [FreeCAD.Placement()]
-    )
+    if parent is not None:
+        parent_transforms = _pattern_transforms(parent, True, visited)
+    else:
+        placement = _seed_placement(pattern)
+        if placement is None:
+            parent_transforms = [FreeCAD.Placement()]
+        else:
+            instance_link = _pattern_instance_link(placement)
+            if instance_link is None:
+                raise ValueError("The placed seed occurrence link is missing.")
+            parent_transforms = [_occurrence_delta_placement(instance_link)]
     own_transforms = _own_pattern_transforms(pattern)
-    combined = [
-        own.multiply(parent_transform)
-        for own in own_transforms
-        for parent_transform in parent_transforms
-    ]
+    each_seed_frame = str(getattr(pattern, "TransformFrame", "World")) == (
+        "Each Seed Occurrence"
+    )
+    combined = []
+    for own in own_transforms:
+        for parent_transform in parent_transforms:
+            combined.append(
+                parent_transform.multiply(own)
+                if each_seed_frame
+                else own.multiply(parent_transform)
+            )
     return combined if include_seed else combined[len(parent_transforms):]
 
 
@@ -273,7 +357,31 @@ def _pattern_source_part(pattern):
 
 
 def _pattern_instance_link(pattern):
+    link = getattr(pattern, "InstanceLink", None)
+    if link is not None:
+        return link
     return pattern.Document.getObject(pattern.InstanceLinkName)
+
+
+def _set_pattern_instance_link(pattern, instance_link):
+    """Publish one generated Link as the pattern controller's child."""
+    if instance_link is None:
+        if (
+            "InstanceLink" in pattern.PropertiesList
+            and getattr(pattern, "InstanceLink", None) is not None
+        ):
+            pattern.InstanceLink = None
+        return
+    if str(pattern.InstanceLinkName) != instance_link.Name:
+        pattern.InstanceLinkName = instance_link.Name
+    group = pattern.Document.getObject("ConnectedPartPatterns")
+    if group is not None and instance_link in list(group.Group):
+        group.removeObject(instance_link)
+    if (
+        "InstanceLink" in pattern.PropertiesList
+        and getattr(pattern, "InstanceLink", None) is not instance_link
+    ):
+        pattern.InstanceLink = instance_link
 
 
 def _pattern_connection_names(pattern):
@@ -298,6 +406,298 @@ def pattern_connections(pattern):
         if connection is not None
         and getattr(connection, "SheetMetalType", "") == "BoltConnection"
     ]
+
+
+def _placed_source_part(placement):
+    name = str(getattr(placement, "SourcePartName", ""))
+    return placement.Document.getObject(name) if name else None
+
+
+def _is_coordinate_system(obj):
+    """Return whether *obj* is a selectable local coordinate system."""
+    if obj is None or not hasattr(obj, "getGlobalPlacement"):
+        return False
+    type_id = str(getattr(obj, "TypeId", ""))
+    if type_id in ("Part::LocalCoordinateSystem", "PartDesign::CoordinateSystem"):
+        return True
+    return bool(
+        hasattr(obj, "isDerivedFrom")
+        and obj.isDerivedFrom("App::LocalCoordinateSystem")
+    )
+
+
+def _validate_lcs_placement_inputs(source_part, source_lcs, target_lcs, doc=None):
+    """Validate one live manufactured-part placement definition."""
+    if not (
+        source_part is not None
+        and source_part.TypeId == "App::Part"
+        and getattr(source_part, "SheetMetalType", "") == "Part"
+    ):
+        raise ValueError("Select one Sheet Metal Part as the source product.")
+    if source_lcs is None or not hasattr(source_lcs, "getGlobalPlacement"):
+        raise ValueError("Select a source coordinate system inside that part.")
+    if _find_sheet_metal_part(source_lcs) is not source_part:
+        raise ValueError(
+            "The source coordinate system must belong to {}.".format(
+                source_part.Label
+            )
+        )
+    if target_lcs is None or not hasattr(target_lcs, "getGlobalPlacement"):
+        raise ValueError("Select the destination coordinate system.")
+    if source_lcs is target_lcs:
+        raise ValueError("Source and destination coordinate systems must differ.")
+    active_doc = doc if doc is not None else source_part.Document
+    if (
+        source_part.Document is not active_doc
+        or source_lcs.Document is not active_doc
+        or target_lcs.Document is not active_doc
+    ):
+        raise ValueError("The part and both coordinate systems must share a document.")
+    return source_part, source_lcs, target_lcs
+
+
+def resolve_lcs_placement_selection(selection, doc=None):
+    """Resolve the GUI selection into source Part, source LCS, and target LCS.
+
+    The compact workflow is to select the source LCS first and destination LCS
+    second.  Selecting the source Sheet Metal Part as a third item removes any
+    ambiguity when both coordinate systems live inside manufactured parts.
+    """
+    selected = []
+    for obj in selection or []:
+        if obj is not None and obj not in selected:
+            selected.append(obj)
+    parts = [
+        obj for obj in selected
+        if obj.TypeId == "App::Part"
+        and getattr(obj, "SheetMetalType", "") == "Part"
+    ]
+    frames = [obj for obj in selected if _is_coordinate_system(obj)]
+    if len(parts) > 1:
+        raise ValueError("Select at most one source Sheet Metal Part.")
+    if len(frames) != 2:
+        raise ValueError(
+            "Select exactly two coordinate systems: source first, destination second."
+        )
+
+    if parts:
+        source_part = parts[0]
+        source_frames = [
+            frame for frame in frames
+            if _find_sheet_metal_part(frame) is source_part
+        ]
+        if len(source_frames) != 1:
+            raise ValueError(
+                "Exactly one selected coordinate system must belong to {}.".format(
+                    source_part.Label
+                )
+            )
+        source_lcs = source_frames[0]
+    else:
+        owners = [_find_sheet_metal_part(frame) for frame in frames]
+        owned_indices = [index for index, owner in enumerate(owners) if owner is not None]
+        if len(owned_indices) == 1:
+            source_index = owned_indices[0]
+        else:
+            source_index = 0
+        source_lcs = frames[source_index]
+        source_part = owners[source_index]
+        if source_part is None:
+            raise ValueError(
+                "The first selected coordinate system must belong to a Sheet Metal Part."
+            )
+
+    target_lcs = frames[1] if frames[0] is source_lcs else frames[0]
+    return _validate_lcs_placement_inputs(
+        source_part, source_lcs, target_lcs, doc
+    )
+
+
+class SMLCSPlacedPart:
+    """Drive one manufactured-part Link between two published LCS frames."""
+
+    def __init__(
+        self,
+        obj,
+        source_part=None,
+        source_lcs=None,
+        target_lcs=None,
+        instance_link=None,
+    ):
+        self.addVerifyProperties(obj)
+        if source_part is not None:
+            obj.SourcePartName = source_part.Name
+            obj.SourcePartLabel = source_part.Label
+        if source_lcs is not None:
+            obj.SourceLCS = source_lcs
+        if target_lcs is not None:
+            obj.TargetLCS = target_lcs
+        if instance_link is not None:
+            _set_pattern_instance_link(obj, instance_link)
+        obj.Proxy = self
+
+    def addVerifyProperties(self, obj):
+        if "SheetMetalType" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "SheetMetalType",
+                "Placed Part",
+                translate("App::Property", "Sheet-metal object type"),
+            ).SheetMetalType = "LCSPlacedPart"
+            obj.setEditorMode("SheetMetalType", 1)
+        if "SourcePartName" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "SourcePartName",
+                "Placed Part",
+                translate("App::Property", "Internal name of the source part"),
+            )
+            obj.setEditorMode("SourcePartName", 1)
+        if "SourcePartLabel" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "SourcePartLabel",
+                "Placed Part",
+                translate("App::Property", "Label of the source part"),
+            )
+            obj.setEditorMode("SourcePartLabel", 1)
+        if "SourceLCS" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyXLink",
+                "SourceLCS",
+                "Placement References",
+                translate(
+                    "App::Property", "Published mounting frame on the source part"
+                ),
+            )
+        if "TargetLCS" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyXLink",
+                "TargetLCS",
+                "Placement References",
+                translate(
+                    "App::Property", "Published mounting frame at the target"
+                ),
+            )
+        if "InstanceLinkName" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "InstanceLinkName",
+                "Placed Part",
+                translate("App::Property", "Internal name of the placed App::Link"),
+            )
+            obj.setEditorMode("InstanceLinkName", 1)
+        if "InstanceLink" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyLinkChild",
+                "InstanceLink",
+                "Placed Part",
+                translate("App::Property", "Placed App::Link owned by this feature"),
+            )
+            obj.setEditorMode("InstanceLink", 1)
+        instance_link = obj.Document.getObject(str(obj.InstanceLinkName))
+        if instance_link is not None:
+            _set_pattern_instance_link(obj, instance_link)
+        if "PlacementState" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "PlacementState",
+                "Result",
+                translate("App::Property", "Current LCS placement status"),
+            )
+            obj.setEditorMode("PlacementState", 1)
+        if "LastError" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyString",
+                "LastError",
+                "Result",
+                translate("App::Property", "Placement evaluation error"),
+            )
+            obj.setEditorMode("LastError", 1)
+
+    def execute(self, fp):
+        self.addVerifyProperties(fp)
+        try:
+            source_part = _placed_source_part(fp)
+            source_lcs = fp.SourceLCS
+            target_lcs = fp.TargetLCS
+            instance_link = _pattern_instance_link(fp)
+            if source_part is None:
+                raise ValueError("The placed occurrence's source part is missing.")
+            if source_lcs is None or target_lcs is None:
+                raise ValueError(
+                    "The placed occurrence requires source and target LCS references."
+                )
+            if (
+                source_lcs.Document is not fp.Document
+                or target_lcs.Document is not fp.Document
+            ):
+                raise ValueError("Both LCS references must be in the active document.")
+            if instance_link is None or instance_link.TypeId != "App::Link":
+                raise ValueError("The placed occurrence's App::Link is missing.")
+            transform = target_lcs.getGlobalPlacement().multiply(
+                source_lcs.getGlobalPlacement().inverse()
+            )
+            if instance_link.LinkedObject is not source_part:
+                instance_link.LinkedObject = source_part
+            if not bool(instance_link.LinkTransform):
+                instance_link.LinkTransform = True
+            if int(instance_link.ElementCount):
+                instance_link.ElementCount = 0
+            if not instance_link.LinkPlacement.isSame(transform):
+                instance_link.LinkPlacement = transform
+            if not bool(instance_link.Visibility):
+                instance_link.Visibility = True
+            if str(fp.PlacementState) != "Source and target LCS frames resolved":
+                fp.PlacementState = "Source and target LCS frames resolved"
+            if str(fp.LastError):
+                fp.LastError = ""
+        except (AttributeError, ValueError, Part.OCCError) as error:
+            if str(fp.PlacementState) != "Unresolved":
+                fp.PlacementState = "Unresolved"
+            if str(fp.LastError) != str(error):
+                fp.LastError = str(error)
+            FreeCAD.Console.PrintError(
+                "Placed part {}: {}\n".format(fp.Label, error)
+            )
+
+    def onDocumentRestored(self, fp):
+        self.addVerifyProperties(fp)
+        if (
+            SheetMetalTools.isGuiLoaded()
+            and getattr(fp.ViewObject, "Proxy", None) is None
+        ):
+            SMLCSPlacedPartViewProvider(fp.ViewObject)
+
+
+def create_lcs_placed_part(
+    doc,
+    source_part,
+    source_lcs,
+    target_lcs,
+    instance_link=None,
+):
+    """Create a live LCS-to-LCS occurrence, reusing a Link when supplied."""
+    _validate_lcs_placement_inputs(source_part, source_lcs, target_lcs, doc)
+    if instance_link is None:
+        instance_link = doc.addObject("App::Link", "PlacedPartInstance")
+        instance_link.Label = source_part.Label + " " + translate(
+            "SheetMetal", "Occurrence"
+        )
+    controller = doc.addObject("App::FeaturePython", "LCSPlacedPart")
+    controller.Label = source_part.Label + " " + translate(
+        "SheetMetal", "Placement"
+    )
+    SMLCSPlacedPart(
+        controller,
+        source_part,
+        source_lcs,
+        target_lcs,
+        instance_link,
+    )
+    _pattern_group(doc).addObject(controller)
+    doc.recompute()
+    return controller, instance_link
 
 
 def _pattern_depth(pattern, visited=None):
@@ -381,6 +781,7 @@ class SMConnectedPartPattern:
         instance_link=None,
         center=None,
         parent_pattern=None,
+        seed_placement=None,
     ):
         self.addVerifyProperties(obj)
         if source_part is not None:
@@ -389,11 +790,13 @@ class SMConnectedPartPattern:
         if connections is not None:
             obj.ConnectionNames = [connection.Name for connection in connections]
         if instance_link is not None:
-            obj.InstanceLinkName = instance_link.Name
+            _set_pattern_instance_link(obj, instance_link)
         if center is not None:
             obj.PolarCenter = center
         if parent_pattern is not None:
             obj.ParentPatternReference = (parent_pattern, [""])
+        if seed_placement is not None:
+            obj.SeedPlacementReference = seed_placement
         obj.Proxy = self
 
     def addVerifyProperties(self, obj):
@@ -450,6 +853,20 @@ class SMConnectedPartPattern:
                 translate("App::Property", "Generated App::Link array"),
             )
             obj.setEditorMode("InstanceLinkName", 1)
+        if "InstanceLink" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyLinkChild",
+                "InstanceLink",
+                "Connected Pattern",
+                translate(
+                    "App::Property",
+                    "Generated App::Link array owned by this pattern feature",
+                ),
+            )
+            obj.setEditorMode("InstanceLink", 1)
+        instance_link = obj.Document.getObject(str(obj.InstanceLinkName))
+        if instance_link is not None:
+            _set_pattern_instance_link(obj, instance_link)
         if "ParentPatternReference" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyXLinkSub",
@@ -461,6 +878,27 @@ class SMConnectedPartPattern:
                     "feature's seed set",
                 ),
             )
+        if "SeedPlacementReference" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyXLink",
+                "SeedPlacementReference",
+                "Connected Pattern",
+                translate(
+                    "App::Property",
+                    "Optional live LCS-placed occurrence used as the root seed",
+                ),
+            )
+        _set_enumeration(
+            obj,
+            "TransformFrame",
+            TRANSFORM_FRAMES,
+            "World",
+            "Pattern Parameters",
+            translate(
+                "App::Property",
+                "Apply follow-on transforms in world space or in every seed frame",
+            ),
+        )
         _set_enumeration(
             obj,
             "PatternType",
@@ -591,17 +1029,26 @@ class SMConnectedPartPattern:
                 raise ValueError("The repeated part or its instance link is missing.")
             transforms = pattern_transforms(fp)
             additional_count = len(transforms)
-            instance_link.LinkedObject = source_part
-            instance_link.LinkTransform = True
-            instance_link.ElementCount = additional_count
-            instance_link.Visibility = additional_count > 0
+            if instance_link.LinkedObject is not source_part:
+                instance_link.LinkedObject = source_part
+            if not bool(instance_link.LinkTransform):
+                instance_link.LinkTransform = True
+            if int(instance_link.ElementCount) != additional_count:
+                instance_link.ElementCount = additional_count
+            desired_visibility = additional_count > 0
+            if bool(instance_link.Visibility) != desired_visibility:
+                instance_link.Visibility = desired_visibility
             if additional_count:
                 for occurrence, (element, transform) in enumerate(
                     zip(instance_link.ElementList, transforms), start=2
                 ):
-                    element.LinkPlacement = transform
-                    element.Label = "{} {:03d}".format(fp.SourcePartLabel, occurrence)
-            fp.AdditionalOccurrences = additional_count
+                    if not element.LinkPlacement.isSame(transform):
+                        element.LinkPlacement = transform
+                    label = "{} {:03d}".format(fp.SourcePartLabel, occurrence)
+                    if element.Label != label:
+                        element.Label = label
+            if int(fp.AdditionalOccurrences) != additional_count:
+                fp.AdditionalOccurrences = additional_count
             _activate_pattern_connections(fp)
             bolt_count = 0
             for connection in pattern_connections(fp):
@@ -610,14 +1057,20 @@ class SMConnectedPartPattern:
                     record["key"] not in hole_only
                     for record in definition_locator_records(connection)
                 )
-            fp.ConnectionInstanceCount = (
+            connection_instance_count = (
                 len(pattern_transforms(fp, include_seed=True)) * bolt_count
             )
-            fp.LastError = ""
+            if int(fp.ConnectionInstanceCount) != connection_instance_count:
+                fp.ConnectionInstanceCount = connection_instance_count
+            if str(fp.LastError):
+                fp.LastError = ""
         except (ValueError, Part.OCCError) as error:
-            fp.AdditionalOccurrences = 0
-            fp.ConnectionInstanceCount = 0
-            fp.LastError = str(error)
+            if int(fp.AdditionalOccurrences):
+                fp.AdditionalOccurrences = 0
+            if int(fp.ConnectionInstanceCount):
+                fp.ConnectionInstanceCount = 0
+            if str(fp.LastError) != str(error):
+                fp.LastError = str(error)
             FreeCAD.Console.PrintError(
                 "Connected part pattern {}: {}\n".format(fp.Label, error)
             )
@@ -639,6 +1092,42 @@ class SMConnectedPartPattern:
     def occurrenceTransforms(self, fp, include_seed=True):
         """Publish this feature's complete occurrence set to connections."""
         return pattern_transforms(fp, include_seed=include_seed)
+
+
+def repair_connected_part_patterns(doc):
+    """Restore controller proxies and explicit output ownership."""
+    repaired = []
+    if doc is None:
+        return repaired
+    for pattern in doc.Objects:
+        if getattr(pattern, "SheetMetalType", "") != "ConnectedPartPattern":
+            continue
+        proxy = getattr(pattern, "Proxy", None)
+        if not isinstance(proxy, SMConnectedPartPattern):
+            proxy = SMConnectedPartPattern.__new__(SMConnectedPartPattern)
+            pattern.Proxy = proxy
+            pattern.touch()
+            repaired.append(pattern)
+        proxy.addVerifyProperties(pattern)
+    return repaired
+
+
+def repair_lcs_placed_parts(doc):
+    """Restore live LCS placement controllers saved with null proxies."""
+    repaired = []
+    if doc is None:
+        return repaired
+    for placement in doc.Objects:
+        if getattr(placement, "SheetMetalType", "") != "LCSPlacedPart":
+            continue
+        proxy = getattr(placement, "Proxy", None)
+        if not isinstance(proxy, SMLCSPlacedPart):
+            proxy = SMLCSPlacedPart.__new__(SMLCSPlacedPart)
+            placement.Proxy = proxy
+            placement.touch()
+            repaired.append(placement)
+        proxy.addVerifyProperties(placement)
+    return repaired
 
 
 class SMConnectedPatternCut(SMBoltConnectionCut):
@@ -806,11 +1295,15 @@ class SMConnectedPatternCut(SMBoltConnectionCut):
             connection = connection_for_cut(source_cuts[0])
             if connection is not None:
                 obj.ConnectionName = connection.Name
-        obj.CutMode = "No Cut"
-        obj.ValidationState = "Retired; connection occurrence provider is active"
+        if str(obj.CutMode) != "No Cut":
+            obj.CutMode = "No Cut"
+        if str(obj.ValidationState) != "Retired; connection occurrence provider is active":
+            obj.ValidationState = "Retired; connection occurrence provider is active"
 
-    def collect_cutter_batches(self, fp, base_shape):
-        return SMBoltConnectionCut.collect_cutter_batches(self, fp, base_shape)
+    def collect_cutter_batches(self, fp, base_shape, base_cache_token=None):
+        return SMBoltConnectionCut.collect_cutter_batches(
+            self, fp, base_shape, base_cache_token
+        )
 
     def execute(self, fp):
         self.addVerifyProperties(fp)
@@ -847,8 +1340,11 @@ def create_connected_part_pattern(
     axis_reference=None,
     direction_reference=None,
     parent_pattern=None,
+    seed_placement=None,
 ):
     """Create linked part occurrences and repeated cuts in fixed participants."""
+    if parent_pattern is not None and seed_placement is not None:
+        raise ValueError("Choose either a parent pattern or a placed seed, not both.")
     if parent_pattern is not None:
         if (
             getattr(parent_pattern, "SheetMetalType", "")
@@ -859,6 +1355,14 @@ def create_connected_part_pattern(
         if inherited_source is None or inherited_source is not source_part:
             raise ValueError(
                 "The follow-on pattern must use its parent pattern's source part."
+            )
+    if seed_placement is not None:
+        if getattr(seed_placement, "SheetMetalType", "") != "LCSPlacedPart":
+            raise ValueError("The seed occurrence is not an LCS-placed part.")
+        inherited_source = _placed_source_part(seed_placement)
+        if inherited_source is None or inherited_source is not source_part:
+            raise ValueError(
+                "The placed seed must use the selected source part."
             )
     if not (
         source_part is not None
@@ -920,6 +1424,7 @@ def create_connected_part_pattern(
         instance_link,
         center,
         parent_pattern,
+        seed_placement,
     )
     pattern.PatternType = pattern_type
     if axis_reference is not None:
@@ -955,6 +1460,7 @@ def migrate_connected_part_patterns(doc, remove_legacy_cuts=True):
     When requested, obsolete ConnectedPatternCut history nodes are bypassed and
     removed after all downstream feature and unfold links have been rewired.
     """
+    repair_connected_part_patterns(doc)
     patterns = [
         obj
         for obj in doc.Objects
@@ -1111,6 +1617,58 @@ def sync_connection_participant_patterns(connection, participant_cuts):
     return []
 
 
+class _ConnectedPartPatternObserver:
+    """Repair old or partially saved controller objects on activation."""
+
+    def __init__(self):
+        self.updating = False
+
+    def _repair(self, doc):
+        if self.updating or doc is None:
+            return
+        try:
+            self.updating = True
+            repair_connected_part_patterns(doc)
+            repair_lcs_placed_parts(doc)
+        finally:
+            self.updating = False
+
+    def slotActivateDocument(self, doc):
+        self._repair(doc)
+
+    def slotRecomputedDocument(self, doc):
+        if any(
+            (
+                getattr(obj, "SheetMetalType", "") == "ConnectedPartPattern"
+                and (
+                    not isinstance(
+                        getattr(obj, "Proxy", None), SMConnectedPartPattern
+                    )
+                    or "InstanceLink" not in obj.PropertiesList
+                    or _pattern_instance_link(obj) is None
+                )
+            )
+            or (
+                getattr(obj, "SheetMetalType", "") == "LCSPlacedPart"
+                and (
+                    not isinstance(getattr(obj, "Proxy", None), SMLCSPlacedPart)
+                    or "InstanceLink" not in obj.PropertiesList
+                    or _pattern_instance_link(obj) is None
+                )
+            )
+            for obj in doc.Objects
+        ):
+            self._repair(doc)
+
+
+if "_connected_part_pattern_observer" not in globals():
+    _connected_part_pattern_observer = _ConnectedPartPatternObserver()
+    FreeCAD.addDocumentObserver(_connected_part_pattern_observer)
+    for _open_document in FreeCAD.listDocuments().values():
+        repair_connected_part_patterns(_open_document)
+        repair_lcs_placed_parts(_open_document)
+
+
 def _sync_pattern_cut_visibility(cut):
     """Show only the active patterned cut in a participant's history."""
     if not SheetMetalTools.isGuiLoaded():
@@ -1138,6 +1696,18 @@ if SheetMetalTools.isGuiLoaded():
             return [link] if link is not None else []
 
 
+    class SMLCSPlacedPartViewProvider(SheetMetalTools.SMViewProvider):
+        def getIcon(self):
+            return os.path.join(icons_path, "SheetMetal_PlacePartByLCS.svg")
+
+        def getTaskPanel(self, obj):
+            return SMLCSPlacedPartTaskPanel(obj)
+
+        def claimChildren(self):
+            link = _pattern_instance_link(self.Object)
+            return [link] if link is not None else []
+
+
     class SMConnectedPatternCutViewProvider(SheetMetalTools.SMViewProvider):
         def getIcon(self):
             return os.path.join(icons_path, "SheetMetal_ConnectedPartPattern.svg")
@@ -1147,6 +1717,235 @@ if SheetMetalTools.isGuiLoaded():
                 0,
                 lambda obj=view_object.Object: _sync_pattern_cut_visibility(obj),
             )
+
+
+    def repair_connected_pattern_view_providers(doc):
+        """Restore editable GUI behavior and child presentation."""
+        repaired = []
+        if doc is None:
+            return repaired
+        for obj in doc.Objects:
+            sheet_metal_type = str(getattr(obj, "SheetMetalType", ""))
+            view_object = getattr(obj, "ViewObject", None)
+            if view_object is None:
+                continue
+            if sheet_metal_type == "ConnectedPartPattern":
+                if not isinstance(
+                    getattr(view_object, "Proxy", None),
+                    SMConnectedPartPatternViewProvider,
+                ):
+                    SMConnectedPartPatternViewProvider(view_object)
+                    repaired.append(obj)
+            elif sheet_metal_type == "LCSPlacedPart":
+                if not isinstance(
+                    getattr(view_object, "Proxy", None),
+                    SMLCSPlacedPartViewProvider,
+                ):
+                    SMLCSPlacedPartViewProvider(view_object)
+                    repaired.append(obj)
+            elif sheet_metal_type == "ConnectedPatternCut":
+                if not isinstance(
+                    getattr(view_object, "Proxy", None),
+                    SMConnectedPatternCutViewProvider,
+                ):
+                    SMConnectedPatternCutViewProvider(view_object)
+                    repaired.append(obj)
+        return repaired
+
+
+    class _ConnectedPatternViewProviderObserver:
+        def slotActivateDocument(self, doc):
+            repair_connected_pattern_view_providers(doc)
+
+
+    if "_connected_pattern_view_provider_observer" not in globals():
+        _connected_pattern_view_provider_observer = (
+            _ConnectedPatternViewProviderObserver()
+        )
+        FreeCAD.addDocumentObserver(_connected_pattern_view_provider_observer)
+        for _open_document in FreeCAD.listDocuments().values():
+            repair_connected_pattern_view_providers(_open_document)
+
+
+    class SMLCSPlacedPartTaskPanel:
+        """Create or edit one exact LCS-to-LCS linked occurrence."""
+
+        def __init__(self, obj):
+            self.obj = obj
+            obj.Proxy.addVerifyProperties(obj)
+            self.form = QtGui.QWidget()
+            self.form.setWindowTitle(translate("SheetMetal", "Place part by LCS"))
+            layout = QtGui.QVBoxLayout(self.form)
+
+            instructions = QtGui.QLabel(
+                translate(
+                    "SheetMetal",
+                    "Map the source part's mounting coordinate system onto the "
+                    "destination coordinate system. The linked occurrence remains live.",
+                )
+            )
+            instructions.setWordWrap(True)
+            layout.addWidget(instructions)
+
+            form = QtGui.QFormLayout()
+            self.source_part_label = QtGui.QLabel()
+            self.source_lcs_label, self.source_lcs_button, source_widget = (
+                self._reference_row(translate("SheetMetal", "Use selected"))
+            )
+            self.target_lcs_label, self.target_lcs_button, target_widget = (
+                self._reference_row(translate("SheetMetal", "Use selected"))
+            )
+            form.addRow(translate("SheetMetal", "Source product"), self.source_part_label)
+            form.addRow(translate("SheetMetal", "Source LCS"), source_widget)
+            form.addRow(translate("SheetMetal", "Destination LCS"), target_widget)
+            layout.addLayout(form)
+
+            self.swap_button = QtGui.QPushButton(
+                translate("SheetMetal", "Swap source and destination")
+            )
+            layout.addWidget(self.swap_button)
+            self.status = QtGui.QLabel()
+            self.status.setWordWrap(True)
+            layout.addWidget(self.status)
+
+            self.source_lcs_button.clicked.connect(self._use_selected_source_lcs)
+            self.target_lcs_button.clicked.connect(self._use_selected_target_lcs)
+            self.swap_button.clicked.connect(self._swap_references)
+            self._refresh()
+
+        def _reference_row(self, button_text):
+            widget = QtGui.QWidget()
+            row = QtGui.QHBoxLayout(widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            label = QtGui.QLabel()
+            button = QtGui.QPushButton(button_text)
+            row.addWidget(label, 1)
+            row.addWidget(button)
+            return label, button, widget
+
+        def _selected_lcs(self):
+            frames = [
+                selected for selected in Gui.Selection.getSelection()
+                if _is_coordinate_system(selected)
+            ]
+            if len(frames) != 1:
+                SheetMetalTools.smWarnDialog(
+                    translate("SheetMetal", "Select exactly one coordinate system.")
+                )
+                return None
+            return frames[0]
+
+        def _set_references(self, source_part, source_lcs, target_lcs):
+            _validate_lcs_placement_inputs(
+                source_part, source_lcs, target_lcs, self.obj.Document
+            )
+            self.obj.SourcePartName = source_part.Name
+            self.obj.SourcePartLabel = source_part.Label
+            self.obj.SourceLCS = source_lcs
+            self.obj.TargetLCS = target_lcs
+            self.obj.Document.recompute()
+            self._refresh()
+
+        def _use_selected_source_lcs(self):
+            frame = self._selected_lcs()
+            if frame is None:
+                return
+            source_part = _find_sheet_metal_part(frame)
+            if source_part is None:
+                SheetMetalTools.smWarnDialog(
+                    translate(
+                        "SheetMetal",
+                        "The source coordinate system must be inside a Sheet Metal Part.",
+                    )
+                )
+                return
+            try:
+                self._set_references(source_part, frame, self.obj.TargetLCS)
+            except ValueError as error:
+                SheetMetalTools.smWarnDialog(str(error))
+
+        def _use_selected_target_lcs(self):
+            frame = self._selected_lcs()
+            if frame is None:
+                return
+            try:
+                self._set_references(
+                    _placed_source_part(self.obj), self.obj.SourceLCS, frame
+                )
+            except ValueError as error:
+                SheetMetalTools.smWarnDialog(str(error))
+
+        def _swap_references(self):
+            new_source_lcs = self.obj.TargetLCS
+            new_source_part = _find_sheet_metal_part(new_source_lcs)
+            if new_source_part is None:
+                SheetMetalTools.smWarnDialog(
+                    translate(
+                        "SheetMetal",
+                        "The destination LCS is not inside a Sheet Metal Part, "
+                        "so it cannot become the source.",
+                    )
+                )
+                return
+            try:
+                self._set_references(
+                    new_source_part, new_source_lcs, self.obj.SourceLCS
+                )
+            except ValueError as error:
+                SheetMetalTools.smWarnDialog(str(error))
+
+        def _refresh(self):
+            source_part = _placed_source_part(self.obj)
+            source_lcs = self.obj.SourceLCS
+            target_lcs = self.obj.TargetLCS
+            self.source_part_label.setText(
+                source_part.Label if source_part is not None else "?"
+            )
+            self.source_lcs_label.setText(
+                source_lcs.Label if source_lcs is not None else "?"
+            )
+            self.target_lcs_label.setText(
+                target_lcs.Label if target_lcs is not None else "?"
+            )
+            if self.obj.LastError:
+                self.status.setText(
+                    translate("SheetMetal", "Placement error: ") + self.obj.LastError
+                )
+                self.status.setStyleSheet("color: #d9534f;")
+            else:
+                self.status.setText(
+                    translate(
+                        "SheetMetal",
+                        "Live App::Link placement resolved. This occurrence can be "
+                        "selected as the seed for Connected Part Pattern.",
+                    )
+                )
+                self.status.setStyleSheet("")
+
+        def isAllowedAlterSelection(self):
+            return True
+
+        def isAllowedAlterView(self):
+            return True
+
+        def accept(self):
+            try:
+                _validate_lcs_placement_inputs(
+                    _placed_source_part(self.obj),
+                    self.obj.SourceLCS,
+                    self.obj.TargetLCS,
+                    self.obj.Document,
+                )
+                self.obj.Document.recompute()
+                if self.obj.LastError:
+                    raise ValueError(self.obj.LastError)
+            except ValueError as error:
+                SheetMetalTools.smWarnDialog(str(error))
+                return False
+            return SheetMetalTools.taskAccept(self)
+
+        def reject(self):
+            SheetMetalTools.taskReject(self)
 
 
     class SMConnectedPartPatternTaskPanel:
@@ -1170,7 +1969,7 @@ if SheetMetalTools.isGuiLoaded():
             seed_set_layout.setContentsMargins(0, 0, 0, 0)
             self.seed_set_label = QtGui.QLabel()
             self.seed_set_button = QtGui.QPushButton(
-                translate("SheetMetal", "Use selected pattern")
+                translate("SheetMetal", "Use selected seed")
             )
             self.seed_set_clear = QtGui.QPushButton(
                 translate("SheetMetal", "Use source part only")
@@ -1190,6 +1989,9 @@ if SheetMetalTools.isGuiLoaded():
             self.occurrences = QtGui.QSpinBox()
             self.occurrences.setRange(1, 10000)
             self.occurrences.setValue(int(obj.Occurrences))
+            self.transform_frame = QtGui.QComboBox()
+            self.transform_frame.addItems(TRANSFORM_FRAMES)
+            self.transform_frame.setCurrentText(str(obj.TransformFrame))
             expression = _property_expression(obj, "Occurrences")
             if expression:
                 self.occurrences.setEnabled(False)
@@ -1199,6 +2001,9 @@ if SheetMetalTools.isGuiLoaded():
             common.addRow(translate("SheetMetal", "Pattern type"), self.pattern_type)
             common.addRow(
                 translate("SheetMetal", "Total occurrences"), self.occurrences
+            )
+            common.addRow(
+                translate("SheetMetal", "Transform frame"), self.transform_frame
             )
             layout.addLayout(common)
 
@@ -1288,6 +2093,9 @@ if SheetMetalTools.isGuiLoaded():
             self.seed_set_clear.clicked.connect(self._clear_seed_pattern)
             self.occurrences.valueChanged.connect(
                 lambda value: self._set_property("Occurrences", value)
+            )
+            self.transform_frame.currentTextChanged.connect(
+                lambda value: self._set_property("TransformFrame", value)
             )
             self._connect_vector(self.center[1], "PolarCenter")
             self._connect_vector(self.axis[1], "PolarAxis")
@@ -1464,10 +2272,19 @@ if SheetMetalTools.isGuiLoaded():
 
         def _refresh_seed_pattern(self):
             parent = _parent_pattern(self.obj)
+            placement = _seed_placement(self.obj)
             self.seed_set_label.setText(
-                parent.Label if parent is not None else self.obj.SourcePartLabel
+                parent.Label
+                if parent is not None
+                else (
+                    placement.Label
+                    if placement is not None
+                    else self.obj.SourcePartLabel
+                )
             )
-            self.seed_set_clear.setEnabled(parent is not None)
+            self.seed_set_clear.setEnabled(
+                parent is not None or placement is not None
+            )
 
         def _use_selected_seed_pattern(self):
             patterns = [
@@ -1476,16 +2293,24 @@ if SheetMetalTools.isGuiLoaded():
                 if getattr(selected, "SheetMetalType", "")
                 == "ConnectedPartPattern"
             ]
-            if len(patterns) != 1:
+            placements = []
+            for selected in Gui.Selection.getSelection():
+                placement = _placement_for_selection(selected)
+                if placement is not None and placement not in placements:
+                    placements.append(placement)
+            if len(patterns) + len(placements) != 1:
                 SheetMetalTools.smWarnDialog(
                     translate(
                         "SheetMetal",
-                        "Select exactly one earlier connected part pattern.",
+                        "Select exactly one earlier pattern or LCS-placed occurrence.",
                     )
                 )
                 return
             try:
-                set_parent_pattern(self.obj, patterns[0])
+                if patterns:
+                    set_parent_pattern(self.obj, patterns[0])
+                else:
+                    set_seed_placement(self.obj, placements[0])
                 self.obj.Document.recompute()
                 self._refresh_seed_pattern()
             except ValueError as error:
@@ -1493,6 +2318,7 @@ if SheetMetalTools.isGuiLoaded():
 
         def _clear_seed_pattern(self):
             set_parent_pattern(self.obj, None)
+            set_seed_placement(self.obj, None)
             self.obj.Document.recompute()
             self._refresh_seed_pattern()
 
@@ -1528,11 +2354,17 @@ if SheetMetalTools.isGuiLoaded():
         connections = []
         references = []
         patterns = []
+        placements = []
         for obj in Gui.Selection.getSelection():
             sheet_metal_type = getattr(obj, "SheetMetalType", "")
             if sheet_metal_type == "ConnectedPartPattern":
                 if obj not in patterns:
                     patterns.append(obj)
+                continue
+            placement = _placement_for_selection(obj)
+            if placement is not None:
+                if placement not in placements:
+                    placements.append(placement)
                 continue
             if sheet_metal_type == "BoltConnection":
                 if obj not in connections:
@@ -1548,7 +2380,53 @@ if SheetMetalTools.isGuiLoaded():
             part = _find_sheet_metal_part(obj)
             if part is not None and part not in parts:
                 parts.append(part)
-        return parts, connections, references, patterns
+        return parts, connections, references, patterns, placements
+
+
+    class AddLCSPlacedPartCommandClass:
+        def GetResources(self):
+            return {
+                "Pixmap": os.path.join(
+                    icons_path, "SheetMetal_PlacePartByLCS.svg"
+                ),
+                "MenuText": translate("SheetMetal", "Place Part by LCS"),
+                "ToolTip": translate(
+                    "SheetMetal",
+                    "Create a live linked occurrence by mapping a source part LCS "
+                    "onto a destination LCS. Select source LCS first, destination "
+                    "LCS second; optionally also select the source Sheet Metal Part.",
+                ),
+            }
+
+        def Activated(self):
+            doc = FreeCAD.ActiveDocument
+            try:
+                source_part, source_lcs, target_lcs = (
+                    resolve_lcs_placement_selection(
+                        Gui.Selection.getSelection(), doc
+                    )
+                )
+            except ValueError as error:
+                SheetMetalTools.smWarnDialog(str(error))
+                return
+
+            doc.openTransaction("PlacePartByLCS")
+            try:
+                placement, _instance_link = create_lcs_placed_part(
+                    doc, source_part, source_lcs, target_lcs
+                )
+                SMLCSPlacedPartViewProvider(placement.ViewObject)
+                Gui.Selection.clearSelection()
+                Gui.Selection.addSelection(placement)
+                dialog = SMLCSPlacedPartTaskPanel(placement)
+                SheetMetalTools.updateTaskTitleIcon(dialog)
+                Gui.Control.showDialog(dialog)
+            except (ValueError, Part.OCCError) as error:
+                doc.abortTransaction()
+                SheetMetalTools.smWarnDialog(str(error))
+
+        def IsActive(self):
+            return FreeCAD.ActiveDocument is not None
 
 
     class AddConnectedPartPatternCommandClass:
@@ -1561,13 +2439,14 @@ if SheetMetalTools.isGuiLoaded():
                 "ToolTip": translate(
                     "SheetMetal",
                     "Pattern one Sheet Metal Part and selected bolted connections, "
-                    "or apply a follow-on transform to a selected connected pattern.",
+                    "start from an LCS-placed occurrence, or apply a follow-on "
+                    "transform to a selected connected pattern.",
                 ),
             }
 
         def Activated(self):
             doc = FreeCAD.ActiveDocument
-            parts, connections, references, patterns = _selection_data()
+            parts, connections, references, patterns, placements = _selection_data()
             doc.openTransaction("ConnectedPartPattern")
             try:
                 parent_pattern = patterns[0] if patterns else None
@@ -1575,7 +2454,14 @@ if SheetMetalTools.isGuiLoaded():
                     source_part = _pattern_source_part(parent_pattern)
                     selected_connections = pattern_connections(parent_pattern)
                     pattern_type = "Linear"
+                    seed_placement = None
+                elif placements:
+                    seed_placement = placements[0]
+                    source_part = _placed_source_part(seed_placement)
+                    selected_connections = connections
+                    pattern_type = "Polar"
                 else:
+                    seed_placement = None
                     source_part = parts[0]
                     selected_connections = connections
                     pattern_type = "Polar"
@@ -1595,6 +2481,7 @@ if SheetMetalTools.isGuiLoaded():
                         else None
                     ),
                     parent_pattern=parent_pattern,
+                    seed_placement=seed_placement,
                 )
                 SMConnectedPartPatternViewProvider(pattern.ViewObject)
                 for cut in cuts:
@@ -1611,12 +2498,31 @@ if SheetMetalTools.isGuiLoaded():
         def IsActive(self):
             if FreeCAD.ActiveDocument is None:
                 return False
-            parts, connections, references, patterns = _selection_data()
-            direct = len(parts) == 1 and bool(connections) and not patterns
-            follow_on = len(patterns) == 1 and not parts and not connections
-            return (direct or follow_on) and len(references) <= 1
+            parts, connections, references, patterns, placements = _selection_data()
+            direct = (
+                len(parts) == 1
+                and bool(connections)
+                and not patterns
+                and not placements
+            )
+            placed = (
+                len(placements) == 1
+                and bool(connections)
+                and not parts
+                and not patterns
+            )
+            follow_on = (
+                len(patterns) == 1
+                and not parts
+                and not connections
+                and not placements
+            )
+            return (direct or placed or follow_on) and len(references) <= 1
 
 
+    Gui.addCommand(
+        "SheetMetal_PlacePartByLCS", AddLCSPlacedPartCommandClass()
+    )
     Gui.addCommand(
         "SheetMetal_ConnectedPartPattern", AddConnectedPartPatternCommandClass()
     )

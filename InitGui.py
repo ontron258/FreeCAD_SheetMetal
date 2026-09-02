@@ -100,6 +100,7 @@ class SMWorkbench(Workbench):
             "SheetMetal_SketchOnSheet",
             "SheetMetal_AddCutout",
             "SheetMetal_BoltConnection",
+            "SheetMetal_PlacePartByLCS",
             "SheetMetal_ConnectedPartPattern",
             "SheetMetal_MirroredPart",
             "SheetMetal_Forming",

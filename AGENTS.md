@@ -96,6 +96,11 @@ their owning Sheet Metal Part and consume its thickness. Their
   link placement.
 - DXF export uses explicit `CUT`, `BEND`, `INTERNAL`, `BEND_LABEL`, and
   `BEND_CUT` layers.
+- V2 Unfold recompute persists schema-versioned physical bend occurrences in
+  `BendData`, the schema number in `BendDataVersion`, the A-side normal in
+  `BendReferenceNormal`, and a native local-frame centerline compound in
+  `BendLines`. Keep drawing grouping, backstops, labels, and table layout out of
+  the Sheet Metal model contract.
 
 Workspace link placement is presentation state. Manufacturing export and future
 drawings should reference the real Unfold geometry, not the arranged links.

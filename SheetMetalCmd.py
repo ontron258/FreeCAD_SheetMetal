@@ -2062,6 +2062,54 @@ class SMBendWall:
         fp.Shape = s
 
 
+def _is_bend_wall_feature(obj):
+    return (
+        "Python" in getattr(obj, "TypeId", "")
+        and all(
+            name in obj.PropertiesList
+            for name in ("baseObject", "radius", "length", "angle", "BendType")
+        )
+    )
+
+
+def repairDocumentBendWalls(doc):
+    """Restore Bend proxies in documents saved with null Python objects."""
+    repaired = []
+    if doc is None:
+        return repaired
+    for obj in doc.Objects:
+        if not _is_bend_wall_feature(obj):
+            continue
+        proxy = getattr(obj, "Proxy", None)
+        if not isinstance(proxy, SMBendWall):
+            proxy = SMBendWall.__new__(SMBendWall)
+            obj.Proxy = proxy
+            obj.touch()
+            repaired.append(obj)
+        proxy.addVerifyProperties(obj)
+    return repaired
+
+
+class _BendWallProxyObserver:
+    def slotActivateDocument(self, doc):
+        repairDocumentBendWalls(doc)
+
+    def slotRecomputedDocument(self, doc):
+        if any(
+            _is_bend_wall_feature(obj)
+            and not isinstance(getattr(obj, "Proxy", None), SMBendWall)
+            for obj in doc.Objects
+        ):
+            repairDocumentBendWalls(doc)
+
+
+if "_bend_wall_proxy_observer" not in globals():
+    _bend_wall_proxy_observer = _BendWallProxyObserver()
+    FreeCAD.addDocumentObserver(_bend_wall_proxy_observer)
+    for _open_document in FreeCAD.listDocuments().values():
+        repairDocumentBendWalls(_open_document)
+
+
 ###################################################################################################
 # Gui code
 ###################################################################################################
@@ -2091,6 +2139,40 @@ if SheetMetalTools.isGuiLoaded():
             Backward compatibility only.
 
         """
+
+
+    def repairBendWallViewProviders(doc):
+        """Restore Bend edit providers after a null-proxy save."""
+        repaired = []
+        if doc is None:
+            return repaired
+        for obj in doc.Objects:
+            if not _is_bend_wall_feature(obj):
+                continue
+            view_object = getattr(obj, "ViewObject", None)
+            if view_object is None:
+                continue
+            expected = (
+                SMViewProviderFlat
+                if SheetMetalTools.smIsPartDesign(obj)
+                else SMViewProviderTree
+            )
+            if not isinstance(getattr(view_object, "Proxy", None), expected):
+                expected(view_object)
+                repaired.append(obj)
+        return repaired
+
+
+    class _BendWallViewProviderObserver:
+        def slotActivateDocument(self, doc):
+            repairBendWallViewProviders(doc)
+
+
+    if "_bend_wall_view_provider_observer" not in globals():
+        _bend_wall_view_provider_observer = _BendWallViewProviderObserver()
+        FreeCAD.addDocumentObserver(_bend_wall_view_provider_observer)
+        for _open_document in FreeCAD.listDocuments().values():
+            repairBendWallViewProviders(_open_document)
 
 
     class SMBendWallTaskPanel:

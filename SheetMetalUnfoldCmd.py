@@ -31,6 +31,7 @@ import FreeCAD
 import Part
 
 import SheetMetalBendCuts
+import SheetMetalBendData
 import SheetMetalKfactor
 import SheetMetalMaterial
 import SheetMetalTools
@@ -528,6 +529,49 @@ class SMUnfold:
             "Hidden",
             attribs=8,  # Output only - no recompute if changed
         )
+        SheetMetalTools.smAddProperty(
+            obj,
+            "App::PropertyInteger",
+            "BendDataVersion",
+            translate("SheetMetal", "Version of the persisted semantic bend data"),
+            0,
+            "Bend Data",
+            readOnly=True,
+            attribs=8,
+        )
+        SheetMetalTools.smAddProperty(
+            obj,
+            "App::PropertyString",
+            "BendData",
+            translate("SheetMetal", "Versioned semantic bend occurrences as JSON"),
+            "",
+            "Bend Data",
+            readOnly=True,
+            attribs=8,
+        )
+        SheetMetalTools.smAddProperty(
+            obj,
+            "Part::PropertyPartShape",
+            "BendLines",
+            translate(
+                "SheetMetal",
+                "Bend centerlines in the local coordinate frame of the unfolded solid",
+            ),
+            None,
+            "Bend Data",
+            readOnly=True,
+            attribs=8,
+        )
+        SheetMetalTools.smAddProperty(
+            obj,
+            "App::PropertyVector",
+            "BendReferenceNormal",
+            translate("SheetMetal", "A-side normal defining bend direction"),
+            None,
+            "Bend Data",
+            readOnly=True,
+            attribs=8,
+        )
         SheetMetalTools.smAddBoolProperty(obj,
             "ShowBendAngles",
             translate("SheetMetal", "Show bend angles on the unfold sketch"),
@@ -782,7 +826,24 @@ class SMUnfold:
                     obj.Proxy.CutSketchColor,
                 )
                 sketches.append(cut_sketch)
+        bend_data = SheetMetalBendData.build_bend_data(
+            baseObject, baseFace, root_normal, bend_infodata
+        )
+        obj.BendDataVersion = SheetMetalBendData.BEND_DATA_VERSION
+        obj.BendData = SheetMetalBendData.dumps_bend_data(bend_data)
+        obj.BendReferenceNormal = root_normal
+        obj.BendLines = Part.makeCompound(
+            [info.unfold_line for info in bend_infodata if info.unfold_line is not None]
+        )
         return unfolded_shape, sketches
+
+    def clearBendData(self, obj):
+        """Clear V2-only outputs when the legacy unfolder is selected."""
+
+        obj.BendDataVersion = 0
+        obj.BendData = ""
+        obj.BendReferenceNormal = FreeCAD.Vector()
+        obj.BendLines = Part.Shape()
 
     def oldUnfolder(self, obj, baseObject, baseFace):
         """Use old unfolder system.
@@ -830,6 +891,7 @@ class SMUnfold:
         baseObj, baseFace = resolveUnfoldSource(fp)
         if not NewUnfolderAvailable or SheetMetalTools.use_old_unfolder():
             shape, sketches = self.oldUnfolder(fp, baseObj, baseFace)
+            self.clearBendData(fp)
         else:
             shape, sketches = self.newUnfolder(fp, baseObj, baseFace)
 

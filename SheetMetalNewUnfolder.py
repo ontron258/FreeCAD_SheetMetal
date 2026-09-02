@@ -1141,6 +1141,12 @@ class BendInfo:
         self.line = bend_line
         self.angle = bend_angle
         self.radius = bend_radius
+        # Populated by ``unfold``/``getUnfold`` once the source topology and
+        # returned Unfold object's local coordinate frame are known.
+        self.source_face_index = None
+        self.source_edge_index = None
+        self.thickness = 0.0
+        self.unfold_line = None
 
     def getLabelLocation(self, sketch_normal: Vector, distance: float) -> tuple[Vector, Vector]:
         center_parameter = 0.5 * (self.line.FirstParameter + self.line.LastParameter)
@@ -1412,6 +1418,9 @@ def unfold(
             flattened_edges, bend_info = unroll_cylinder(
                 bend_part, uvref, bac, thickness, seam_edges
             )
+            bend_info.source_face_index = e[1] + 1
+            bend_info.source_edge_index = edge_before_bend_index + 1
+            bend_info.thickness = thickness
             # Add the transformation and unbend shape to the end node
             # of the edge as attributes.
             bend_info.line = bend_info.line.transformed(alignment_transform)
@@ -1504,6 +1513,13 @@ def getUnfold(
     )
     for bend_info in bend_lines_info:
         bend_info.line = bend_info.line.transformed(sketch_align_transform)
+        # ``line`` remains in the origin-aligned sketch frame used by bend-cut
+        # and label generation. ``unfold_line`` matches the local coordinate
+        # frame of the solid returned from this function, which lets TechDraw
+        # consumers project it without duplicating or guessing transforms.
+        bend_info.unfold_line = bend_info.line.transformed(
+            sketch_align_transform.inverse()
+        )
     thickness = EstimateThickness.using_best_method(shp, root_face_index)
     sketch_lines = [e.transformed(sketch_align_transform) for e in sketch_lines]
     bend_lines = [bi.line for bi in bend_lines_info]

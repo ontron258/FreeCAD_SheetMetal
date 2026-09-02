@@ -232,8 +232,11 @@ identity.
 - The relay has no authentication or network hardening yet.
 - Object creation replay assumes the receiving FreeCAD installation provides
   the same registered object types and Python proxies.
-- This worktree starts at committed revision `6c5fcff`; unrelated uncommitted
-  changes from the main SheetMetal checkout are intentionally absent.
+- This private topic branch is rebased onto the SheetMetal `dev` integration
+  branch. It therefore tests against the complete custom SheetMetal feature
+  stack while keeping collaboration code isolated until explicit promotion.
+  Rebase it onto `dev` again after future SheetMetal integrations rather than
+  maintaining a second copy of the modeling code.
 
 ## Verification
 

@@ -124,24 +124,14 @@ def _copy_part_defaults(source, target):
 
 
 def _add_mirror_identity(part, source):
-    if "DerivedFrom" not in part.PropertiesList:
-        part.addProperty(
-            "App::PropertyLink",
-            "DerivedFrom",
-            "Manufacturing",
-            translate("App::Property", "Source product for this manufactured variant"),
-        )
-    part.DerivedFrom = source
-    part.setEditorMode("DerivedFrom", 1)
-    if "VariantType" not in part.PropertiesList:
-        part.addProperty(
-            "App::PropertyString",
-            "VariantType",
-            "Manufacturing",
-            translate("App::Property", "Relationship to the source product"),
-        )
-    part.VariantType = "Mirrored derivative"
-    part.setEditorMode("VariantType", 1)
+    """Optional release metadata; source geometry remains owned by SheetMetal."""
+    try:
+        from freecad_release_manager.identity import add_derived_identity
+    except ModuleNotFoundError as error:
+        if error.name not in ("freecad_release_manager", "freecad_release_manager.identity"):
+            raise
+        return
+    add_derived_identity(part, source, "Mirrored derivative")
 
 
 class SMMirroredPart:

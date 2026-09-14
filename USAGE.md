@@ -17,6 +17,22 @@ Use SheetMetal alone for local modeling. Install both addons when collaborating
 on SheetMetal models. Every client and the validator then need matching
 SheetMetal code; the relay itself does not need SheetMetal or FreeCAD.
 
+## Release Manager integration
+
+The independent `FreeCAD_ReleaseManager` addon now owns automatic drawing-name
+maintenance (`DrawingName`, `UseGroupInDrawingName`) and generic derivative lineage
+(`DerivedFrom`, `VariantType`). Install it beside this fork to retain these features.
+`SheetMetalNaming.py` remains a compatibility entry point; saved property names are unchanged.
+Existing metadata remains stored when Release Manager is absent, and SheetMetal geometry,
+mirroring, material upgrades and parameter propagation continue to work independently.
+
+Release Manager also captures configured parts, compares manufacturing definitions,
+creates TechDraw pages from preserved geometry and exports reviewed release packages.
+Material catalogs, `SheetMetalConfiguration.MaterialUpgrade`, part defaults, unfolded
+geometry and bend-data generation remain in SheetMetal. Its README documents installation
+and the new workflow. Deploy matching addon code to collaboration clients and validator;
+restart together and create a new environment checkpoint after this runtime update.
+
 ## Branches and installation
 
 `main` is the default branch and the configured modeling checkout. It combines

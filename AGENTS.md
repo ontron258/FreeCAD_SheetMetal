@@ -31,6 +31,17 @@ SheetMetal must remain usable without a collaboration server. Do not restore
 the removed embedded collaboration package or SheetMetal collaboration submenu.
 When a task spans both repos, inspect/test each and commit/push each separately.
 
+## Release Manager boundary
+
+General drawing naming and derivative lineage now live in the independent
+`C:\FreeCAD\FreeCAD_ReleaseManager` addon. `SheetMetalNaming.py` is an optional
+compatibility shim; preserve its public entry points and saved property names.
+The mirror command delegates metadata creation while retaining all geometry behavior.
+Do not reintroduce release records, naming observers or packaging into SheetMetal.
+Material configuration and the VarSet propagation repair remain modeling responsibilities.
+Install Release Manager when running naming/lineage regression tests, and verify basic
+modeling still works without it. Follow its AGENTS.md when changing the shared contracts.
+
 ## Git workflow
 
 The remotes have distinct roles:

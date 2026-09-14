@@ -29,10 +29,11 @@ Branch conventions:
 - `master` mirrors `upstream/master`. Do not develop directly on it.
 - `dev` is the integration branch for the complete local feature set.
 - Use focused topic branches when preparing isolated upstream contributions.
-- Keep the transaction-level collaboration prototype on
-  `feature/collaboration-prototype` in
-  `C:\FreeCAD\worktrees\FreeCAD_Collaboration` until it is explicitly promoted.
-  Rebase that private branch onto `dev` after integrating SheetMetal changes.
+- General collaboration now lives in the independent private repository
+  `ontron258/FreeCAD_Collaboration` (local `C:\FreeCAD\FreeCAD_Collaboration`).
+  Do not add server, protocol or collaboration GUI code back into SheetMetal.
+  The old feature branch preserves the extraction history; standalone installation
+  uses its own Collaboration workbench and optional configured modeling addons.
 
 Keep commits cohesive and independently understandable. In particular, avoid
 leaving verified changes only on disk: the user requests that code changes be

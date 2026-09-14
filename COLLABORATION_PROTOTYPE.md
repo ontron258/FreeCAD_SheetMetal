@@ -1,5 +1,12 @@
 # FreeCAD Transaction Collaboration Prototype
 
+**Moved:** runnable collaboration code, tests and launchers now live in the
+independent private repository https://github.com/ontron258/FreeCAD_Collaboration.
+Install its standalone Collaboration workbench separately. These notes preserve
+the earlier SheetMetal-hosted design history; the new repository README is
+authoritative for installation, authentication and LAN setup. SheetMetal no
+longer registers a Collaboration menu or ships the collaboration Python package.
+
 ## Objective
 
 Prove that ordinary FreeCAD transactions can be represented by a generic,

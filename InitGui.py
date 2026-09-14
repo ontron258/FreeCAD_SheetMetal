@@ -78,6 +78,7 @@ class SMWorkbench(Workbench):
         import SheetMetalSketch
         import SheetMetalShapedFlangeCmd
         import SheetMetalFromSolid
+        import SheetMetalWeldedMeshCmd
 
         self.list = [
             "SheetMetal_BaseShape",
@@ -85,6 +86,8 @@ class SMWorkbench(Workbench):
             "SheetMetal_AddBase",
             "SheetMetal_ShapedFlange",
             "SheetMetal_FromSolid",
+            "SheetMetal_WeldedMesh",
+            "SheetMetal_EditableMesh",
             "SheetMetal_AddWall",
             "SheetMetal_AddHem",
             "SheetMetal_Extrude",

@@ -1,0 +1,46 @@
+"""Create a sample bent mesh in a new document; no existing file is changed."""
+
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+
+from SheetMetalBaseCmd import SMBaseBend
+from SheetMetalCmd import SMBendWall
+from SheetMetalWeldedMeshCmd import create_welded_mesh
+
+mesh_demo_doc = App.newDocument("WeldedMeshDemo")
+mesh_demo_carrier = mesh_demo_doc.addObject("App::Part", "FormingReference")
+mesh_demo_carrier.Label = "Forming Reference"
+mesh_demo_profile = mesh_demo_doc.addObject("Part::Feature", "CarrierProfile")
+mesh_demo_profile.Shape = Part.makePolygon([
+    App.Vector(0, 0, 0), App.Vector(120, 0, 0), App.Vector(120, 80, 0),
+    App.Vector(0, 80, 0), App.Vector(0, 0, 0),
+])
+mesh_demo_carrier.addObject(mesh_demo_profile)
+mesh_demo_base = mesh_demo_doc.addObject("Part::FeaturePython", "CarrierBase")
+SMBaseBend(mesh_demo_base, mesh_demo_profile)
+mesh_demo_base.Thickness = 1.5
+mesh_demo_base.Radius = 8
+mesh_demo_base.BendSide = "Outside"
+mesh_demo_carrier.addObject(mesh_demo_base)
+mesh_demo_doc.recompute()
+mesh_demo_bend = mesh_demo_doc.addObject("Part::FeaturePython", "CarrierBend")
+SMBendWall(mesh_demo_bend, mesh_demo_base, ["Edge4"])
+mesh_demo_bend.radius = 8
+mesh_demo_bend.length = 40
+mesh_demo_bend.angle = 90
+mesh_demo_bend.BendType = "Material Outside"
+mesh_demo_carrier.addObject(mesh_demo_bend)
+mesh_demo_doc.recompute()
+mesh_demo_faces = [i for i, f in enumerate(mesh_demo_bend.Shape.Faces)
+                   if isinstance(f.Surface, Part.Plane) and f.normalAt(0, 0).z > 0.9]
+mesh_demo_face = max(mesh_demo_faces, key=lambda i: mesh_demo_bend.Shape.Faces[i].Area)
+mesh_demo_part, mesh_demo_formed = create_welded_mesh(
+    mesh_demo_doc, mesh_demo_bend, "Face" + str(mesh_demo_face + 1),
+    LongitudePitch=12, LatitudePitch=12, WeldPenetration=0.3,
+)
+for mesh_demo_reference in (mesh_demo_carrier, mesh_demo_profile, mesh_demo_base, mesh_demo_bend):
+    mesh_demo_reference.ViewObject.Visibility = False
+mesh_demo_doc.recompute()
+Gui.activeDocument().activeView().viewAxonometric()
+Gui.activeDocument().activeView().fitAll()

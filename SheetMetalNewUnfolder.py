@@ -1353,11 +1353,16 @@ def compute_unbend_transform(
     return alignment_transform, overall_transform, uvref
 
 def unfold(
-    shape: Part.Shape, root_face_index: int, bac: BendAllowanceCalculator
+    shape: Part.Shape, root_face_index: int, bac: BendAllowanceCalculator,
+    face_map: list | None = None,
 ) -> tuple[list[Part.Edge], list[BendInfo]]:
     """Given a solid body of a sheet metal part and a reference face, computes
     a solid representation of the unbent object, as well as a compound object
     containing straight edges for each bend centerline.
+
+    ``face_map`` optionally receives the per-face development data needed to
+    map paths back to the formed sheet. Existing callers and return values
+    are unchanged. Coordinates are in the root face's unfolded frame.
     """
     graph_of_sheet_faces = build_graph_of_tangent_faces(shape, root_face_index)
     thickness = EstimateThickness.using_best_method(shape, root_face_index)
@@ -1414,6 +1419,11 @@ def unfold(
         # Determine the unbent face shape from the reference UV position.
         # Also get a bend line across the middle of the flattened face.
         dg.nodes[e[1]]["unbend_transform"] = overall_transform
+        if face_map is not None:
+            dg.nodes[e[1]]["mapping"] = {
+                "alignment": alignment_transform,
+                "uvref": uvref,
+            }
         try:
             flattened_edges, bend_info = unroll_cylinder(
                 bend_part, uvref, bac, thickness, seam_edges
@@ -1429,6 +1439,9 @@ def unfold(
                 e.transformed(alignment_transform) for e in flattened_edges
             ]
         except Exception as E:
+            if face_map is not None:
+                # A partial outline cannot be used as a forming reference.
+                raise
             msg = (
                 f"failed to unroll a cylindrical face (Face{e[1] + 1})\n"
                 + f"Original exception: {E}\n"
@@ -1454,6 +1467,31 @@ def unfold(
         # Use reduce() to do repeated matrix multiplication
         # Matrix() * M_1 * M_2 * ... * M_N for N matrices.
         final_mat = reduce(multiply_operator, list_of_matrices, Matrix())
+        if face_map is not None:
+            source_face = shape.Faces[face_id]
+            entry = {
+                "face_index": face_id,
+                "face": source_face,
+                "transform": final_mat,
+                "thickness": thickness,
+            }
+            if "mapping" in node_data[face_id]:
+                entry.update(node_data[face_id]["mapping"])
+                # Include seams here: each patch needs its complete boundary.
+                boundary, _info = unroll_cylinder(
+                    source_face, entry["uvref"], bac, thickness, set()
+                )
+                entry["boundary"] = [
+                    edge.transformed(final_mat * entry["alignment"])
+                    for edge in boundary
+                ]
+            elif source_face.Surface.TypeId == "Part::GeomPlane":
+                entry["boundary"] = [
+                    edge.transformed(final_mat) for edge in source_face.Edges
+                ]
+            else:
+                raise ValueError("Wire mesh requires planar panels and cylindrical bends.")
+            face_map.append(entry)
         # Bent faces of the input shape are swapped for their unbent
         # versions.
         if "sketch_lines" in node_data[face_id]:

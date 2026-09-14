@@ -7,6 +7,16 @@ carrier remains a separate, linked object and is hidden on creation.
 
 Run `Macros/WeldedMeshDemo.FCMacro` to create a sample in a new document.
 
+For a more complete example, run `Macros/WeldedMeshTrayDemo.FCMacro`. It creates
+an unsaved document with a constrained 180 x 120 mm floor sketch, three editable
+flanges (42 mm back straight leg, 30 mm side straight legs, R6 bends), and four
+parametric cuts: a rectangular floor window, a round opening, a front notch and
+a back handle slot. The mesh uses 2 mm wire, an initial 10 mm pitch and 0.3 mm
+weld penetration. Both flat wire sketches are editable, and one wire is trimmed
+4 mm at one end. Expand **Forming reference** for the carrier history; use
+**Toggle Flat Pattern Workspace** to inspect the mesh preparation. The product's
+**DemoNotes** property explains the example and how to regenerate its grid.
+
 The carrier defines the formed panels, cylindrical bends and developed layout.
 Editing its geometry recomputes the mesh. The selected source feature is fixed;
 if a later history feature replaces it, update the `Source` reference on **Mesh

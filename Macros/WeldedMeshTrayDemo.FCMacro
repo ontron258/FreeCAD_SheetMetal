@@ -1,0 +1,156 @@
+# -*- coding: utf-8 -*-
+# Copyright 2026 Adrian
+# SPDX-License-Identifier: LGPL-2.0-or-later
+"""Create an editable three-flange mesh tray in a new, unsaved document."""
+
+import FreeCAD as App
+import Part
+import Sketcher
+
+from SheetMetalBaseCmd import SMBaseBend
+from SheetMetalCmd import SMBendWall
+from SheetMetalWeldedMeshCmd import create_welded_mesh, convert_to_editable
+
+
+def create_mesh_tray_demo():
+    doc = App.newDocument("WeldedMeshTray")
+    doc.Label = "Welded mesh tray - flanges and cutouts"
+    carrier = doc.addObject("App::Part", "FormingReference")
+    carrier.Label = "Forming reference - expand to edit flanges and cuts"
+
+    profile = doc.addObject("Sketcher::SketchObject", "FloorProfile")
+    profile.Label = "Floor profile - 180 x 120 mm"
+    carrier.addObject(profile)
+    points = [App.Vector(0, 0, 0), App.Vector(180, 0, 0),
+              App.Vector(180, 120, 0), App.Vector(0, 120, 0)]
+    profile.addGeometry([Part.LineSegment(points[i], points[(i + 1) % 4])
+                         for i in range(4)], False)
+    for i in range(4):
+        profile.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        profile.addConstraint(Sketcher.Constraint("Horizontal" if i % 2 == 0 else "Vertical", i))
+    profile.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -1, 1))
+    width = profile.addConstraint(Sketcher.Constraint("Distance", 0, 180.0))
+    depth = profile.addConstraint(Sketcher.Constraint("Distance", 1, 120.0))
+    profile.renameConstraint(width, "FloorWidth")
+    profile.renameConstraint(depth, "FloorDepth")
+
+    base = doc.addObject("Part::FeaturePython", "CarrierBase")
+    carrier.addObject(base)
+    SMBaseBend(base, profile)
+    base.Label = "Base carrier - 1.5 mm reference thickness"
+    base.Thickness = 1.5
+    base.Radius = 6
+    base.BendSide = "Outside"
+    doc.recompute()
+    if App.GuiUp:
+        from SheetMetalBaseCmd import SMBaseViewProvider
+        SMBaseViewProvider(base.ViewObject)
+
+    source = base
+    for name, axis, position, length in [
+        ("BackFlange", "y", 120, 42),
+        ("LeftFlange", "x", 0, 30),
+        ("RightFlange", "x", 180, 30),
+    ]:
+        # Resolve the base perimeter geometrically rather than assuming an edge
+        # number survives the preceding flange operation.
+        edges = [(i, edge) for i, edge in enumerate(source.Shape.Edges)
+                 if len(edge.Vertexes) == 2 and all(
+                     abs(getattr(v.Point, axis) - position) < 1e-6
+                     and abs(v.Point.z - 1.5) < 1e-6 for v in edge.Vertexes)]
+        index, _edge = max(edges, key=lambda item: item[1].Length)
+        flange = doc.addObject("Part::FeaturePython", name)
+        carrier.addObject(flange)
+        SMBendWall(flange, source, ["Edge" + str(index + 1)])
+        flange.Label = "{} - {} mm straight leg, R6, 90 deg".format(name, length)
+        flange.radius = 6
+        flange.length = length
+        flange.angle = 90
+        flange.invert = False
+        flange.gap1 = flange.gap2 = 8
+        flange.BendType = "Material Outside"
+        flange.LengthSpec = "Leg"
+        doc.recompute()
+        if App.GuiUp:
+            from SheetMetalCmd import SMViewProviderTree
+            SMViewProviderTree(flange.ViewObject)
+        source = flange
+
+    def box_tool(name, label, size, origin):
+        tool = doc.addObject("Part::Box", name)
+        tool.Label = label
+        carrier.addObject(tool)
+        tool.Length, tool.Width, tool.Height = size
+        tool.Placement.Base = App.Vector(*origin)
+        return tool
+
+    tools = [box_tool("FloorWindowTool", "Floor window tool - 60 x 30 mm",
+                      (60, 30, 5), (85, 40, -1))]
+    circular = doc.addObject("Part::Cylinder", "RoundOpeningTool")
+    circular.Label = "Round opening tool - diameter 24 mm"
+    carrier.addObject(circular)
+    circular.Radius, circular.Height = 12, 5
+    circular.Placement.Base = App.Vector(36, 55, -1)
+    tools.append(circular)
+    tools.append(box_tool("FrontNotchTool", "Front edge notch tool - 28 x 14 mm",
+                          (28, 19, 5), (110, -5, -1)))
+    tools.append(box_tool("HandleSlotTool", "Back handle tool - 50 x 14 mm",
+                          (50, 16, 14), (65, 118, 22)))
+    for name, tool in zip(("FloorWindow", "RoundOpening", "FrontNotch", "HandleSlot"), tools):
+        cut = doc.addObject("Part::Cut", name)
+        carrier.addObject(cut)
+        cut.Base, cut.Tool = source, tool
+        cut.Refine = True
+        doc.recompute()
+        source = cut
+    source.Label = "Finished carrier - three flanges and four cuts"
+    if not source.Shape.isValid() or len(source.Shape.Solids) != 1:
+        raise ValueError("The demonstration carrier must be one valid solid.")
+
+    candidates = [i for i, face in enumerate(source.Shape.Faces)
+                  if isinstance(face.Surface, Part.Plane) and face.normalAt(0, 0).z > 0.9]
+    root = max(candidates, key=lambda i: source.Shape.Faces[i].Area)
+    part, mesh = create_welded_mesh(
+        doc, source, "Face" + str(root + 1), LongitudeDiameter=2,
+        LongitudePitch=10, LatitudePitch=10, WeldPenetration=0.3, KFactor=0.5,
+    )
+    part.Label = "Welded mesh tray - 2 mm wire, 10 mm pitch"
+    longitude, latitude = convert_to_editable(mesh)
+    # Demonstrate a local trim, leaving the remaining generated wire layout intact.
+    longest = max(range(longitude.GeometryCount),
+                  key=lambda i: longitude.Geometry[i].length())
+    line = longitude.Geometry[longest]
+    direction = line.EndPoint - line.StartPoint
+    direction.normalize()
+    longitude.delGeometry(longest)
+    longitude.addGeometry(Part.LineSegment(line.StartPoint + direction * 4, line.EndPoint), False)
+    part.addProperty("App::PropertyStringList", "DemoNotes", "Example")
+    part.DemoNotes = [
+        "180 x 120 mm floor; back straight leg 42 mm; side straight legs 30 mm; R6 bends.",
+        "Carrier cuts: 60 x 30 floor window, diameter 24 hole, 28 x 14 front notch, 50 x 14 back handle.",
+        "2 mm wire, initial 10 mm pitch, 0.3 mm weld penetration gives a 3.7 mm welded envelope.",
+        "Both wire sketches are editable. One longitude wire has been shortened by 4 mm at one end.",
+        "Toggle Flat Pattern Workspace to inspect the preparation; double-click a wire sketch to edit it.",
+        "Pitch/count apply after Regenerate wire pattern (keep edited sketches) on Formed Mesh.",
+        "Show the finished carrier and its parent to inspect the forming reference; hide the mesh first.",
+        "Carrier allowance is geometric. Flat and formed wire lengths can differ around bends.",
+    ]
+    doc.recompute()
+    if mesh.LastError or not mesh.Shape.isValid() or not mesh.FlatShape.isValid():
+        raise ValueError(mesh.LastError or "Invalid demonstration wire geometry.")
+
+    if App.GuiUp:
+        import FreeCADGui as Gui
+        for obj in doc.Objects:
+            obj.ViewObject.Visibility = False
+        part.ViewObject.Visibility = True
+        mesh.ViewObject.Visibility = True
+        mesh.ViewObject.ShapeColor = (0.70, 0.74, 0.80)
+        mesh.ViewObject.LineColor = (0.20, 0.24, 0.30)
+        mesh.ViewObject.DisplayMode = "Flat Lines"
+        Gui.activeDocument().activeView().viewAxonometric()
+        Gui.activeDocument().activeView().fitAll()
+    return doc, part, mesh
+
+
+mesh_tray_doc, mesh_tray_part, mesh_tray_formed = create_mesh_tray_demo()

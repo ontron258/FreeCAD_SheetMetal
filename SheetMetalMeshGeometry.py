@@ -256,13 +256,27 @@ def sweep_wire(path, diameter):
 
 def family_collisions(lines, diameter):
     """Detect same-layer overlaps in the flat preparation, including diagonals."""
+    solids = {}
+
+    def cylinder(index):
+        if index not in solids:
+            edge = lines[index]
+            start = edge.valueAt(edge.FirstParameter)
+            solids[index] = Part.makeCylinder(diameter / 2, edge.Length, start,
+                                              edge.tangentAt(edge.FirstParameter))
+        return solids[index]
+
     for i, first in enumerate(lines):
         box = first.BoundBox
-        for second in lines[i + 1:]:
+        for j, second in enumerate(lines[i + 1:], i + 1):
             other = second.BoundBox
             if (box.XMax + diameter < other.XMin or other.XMax + diameter < box.XMin
                     or box.YMax + diameter < other.YMin or other.YMax + diameter < box.YMin):
                 continue
             if first.distToShape(second)[0] < diameter - TOLERANCE:
-                return True
+                # Centreline distance treats ends as hemispheres. Our wires
+                # have flat caps: adjoining pieces at an opening's boundary,
+                # and collinear pieces separated by a gap, do not overlap.
+                if cylinder(i).common(cylinder(j)).Volume > TOLERANCE ** 3:
+                    return True
     return False

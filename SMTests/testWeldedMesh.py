@@ -173,6 +173,19 @@ class TestWeldedMesh(unittest.TestCase):
         self.assertEqual(5, mesh.LongitudeWireCount)
         self.assertTrue(any("overlap" in warning for warning in mesh.Warnings))
 
+    def test_collision_check_respects_flat_wire_ends(self):
+        def line(x1, y1, x2, y2):
+            return Part.makeLine(App.Vector(x1, y1, 0), App.Vector(x2, y2, 0))
+
+        first = line(0, 0, 10, 0)
+        # Cut boundaries can divide one row into pieces that share only an end.
+        self.assertFalse(family_collisions([first, line(10, 0, 20, 0)], 2))
+        self.assertFalse(family_collisions([first, line(10.5, 0, 20, 0)], 2))
+        self.assertTrue(family_collisions([first, line(9, 0, 20, 0)], 2))
+        self.assertTrue(family_collisions([first, line(0, 1, 10, 1)], 2))
+        self.assertTrue(family_collisions([first, line(5, -5, 5, 5)], 2))
+        self.assertFalse(family_collisions([first, line(0, 2, 10, 2)], 2))
+
     def test_invalid_parameters_clear_all_derived_shapes_and_recover(self):
         _source, part, mesh = self.mesh()
         mesh.Definition.WeldPenetration = 3

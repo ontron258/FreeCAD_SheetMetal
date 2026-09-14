@@ -2,6 +2,20 @@
 
 A simple sheet metal tools workbench for FreeCAD
 
+## Using the ontron258 development fork
+
+This repository owns SheetMetal modeling extensions: parts/material defaults,
+Face features, bends, unfolding, flat-pattern layout and DXF export. For this
+fork's installation, current development branch and combined setup, see
+[Usage guide](USAGE.md). The upstream tutorials below remain useful, but the
+standard Addon Manager installation does not select this custom checkout.
+
+General document collaboration, its panel, relay and headless validator live in
+the separate private [FreeCAD_Collaboration repository](https://github.com/ontron258/FreeCAD_Collaboration).
+Install that addon separately and select its **Collaboration** workbench; there
+is no longer a collaboration submenu in SheetMetal. SheetMetal itself can be
+used locally without a collaboration server.
+
 ![Demo Workflow](Resources/SheetMetal4.gif)
 
 ### Tutorial by Joko Engineering:

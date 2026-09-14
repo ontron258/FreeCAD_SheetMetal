@@ -11,11 +11,25 @@ For the current Windows development environment:
 
 - Repository: `C:\FreeCAD\FreeCAD_SheetMetal`
 - FreeCAD installation: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311`
-- Installed addon: `C:\Users\adria\AppData\Roaming\FreeCAD\v1-1\Mod\sheetmetal`
+- Installed addon junction: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\Mod\SheetMetal`
 - Example test document: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\data\examples\Sheetmetal test.FCStd`
 
 Treat the installed addon as a deployment target. Never commit files from the
 installed addon directory.
+
+## Usage documentation and repository boundary
+
+Read `USAGE.md` for fork installation, the currently configured branch, local
+paths and how this addon works alongside the independent Collaboration addon.
+`README.md` links that guide and preserves the upstream modeling tutorials.
+Keep these usage notes current when changing installation or user workflows.
+
+Modeling/material/unfold/DXF changes belong here. General synchronization,
+server storage/protocol, authentication, validation and collaboration GUI changes
+belong in `C:\FreeCAD\FreeCAD_Collaboration`, whose README documents its usage.
+SheetMetal must remain usable without a collaboration server. Do not restore
+the removed embedded collaboration package or SheetMetal collaboration submenu.
+When a task spans both repos, inspect/test each and commit/push each separately.
 
 ## Git workflow
 
@@ -48,8 +62,9 @@ push, rewrite shared history, open an upstream pull request, or merge into
 Before editing, inspect `git status`. Preserve unrelated user changes and never
 use destructive cleanup commands such as `git reset --hard`.
 
-The workspace-wide directory, retention, cleanup, and multi-agent rules are in
-`C:\FreeCAD\WORKSPACE_ORGANIZATION.md` and apply in addition to this guide.
+If `C:\FreeCAD\WORKSPACE_ORGANIZATION.md` exists, read its workspace-wide
+directory, retention, cleanup and multi-agent rules in addition to this guide.
+Do not assume that an absent workspace guide supplies additional instructions.
 
 ## Important feature areas
 

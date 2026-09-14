@@ -4,7 +4,7 @@
 
 [FreeCAD_SheetMetal](https://github.com/ontron258/FreeCAD_SheetMetal) owns CAD
 modeling: Sheet Metal Parts, material defaults, Face features, bends, unfolding,
-flat-pattern presentation/layout and manufacturing DXF export.
+welded mesh parts, flat-pattern presentation/layout and manufacturing DXF export.
 
 The separate private
 [FreeCAD_Collaboration](https://github.com/ontron258/FreeCAD_Collaboration) owns
@@ -19,17 +19,17 @@ SheetMetal code; the relay itself does not need SheetMetal or FreeCAD.
 
 ## Branches and installation
 
-As of the extraction on 2026-09-14, the configured modeling checkout is
-`feature/collaboration-prototype`. Its name is historical: the embedded
-collaboration package has been removed, while its modeling features remain.
-The old collaboration implementation remains recoverable in Git history.
-`dev` remains the modeling integration branch; `master` mirrors upstream.
-Do not assume those branches contain later changes from this checkout.
+`main` is the default branch and the configured modeling checkout. It combines
+the complete histories of `dev` and `feature/collaboration-prototype`, including
+welded mesh parts and the extraction of collaboration into its own addon.
+Continue modeling development on `main`. The previous branches remain available
+for history; `master` mirrors upstream. The old embedded collaboration
+implementation remains recoverable in Git history.
 
 For a new computer, clone the selected modeling branch:
 
 ```powershell
-git clone --branch feature/collaboration-prototype https://github.com/ontron258/FreeCAD_SheetMetal.git 'D:\Source\FreeCAD_SheetMetal'
+git clone --branch main https://github.com/ontron258/FreeCAD_SheetMetal.git 'D:\Source\FreeCAD_SheetMetal'
 ```
 
 Use the same tested FreeCAD build on clients and validator. The current pilot
@@ -67,6 +67,9 @@ Do not edit an installed copy instead of the source repository.
    links to real Unfold objects; arranging those links does not change the model.
 5. Use the flat-pattern/DXF export workflow for cutting and bend information.
 
+For wire parts, see [Welded mesh parts](WELDED_MESH.md) for creating formed and
+flat mesh, setting wire spacing and weld penetration, and editing the wire sketches.
+
 Existing saved Python-feature documents depend on their original proxy classes
 and properties. Keep the addon installed when reopening them; do not rename
 serialized classes/properties casually. See [AGENTS.md](AGENTS.md) for the
@@ -83,6 +86,7 @@ model. Common modules for this fork are:
 - `SheetMetalBaseCmd`, `SheetMetalShapedFlangeCmd`, `SheetMetalCmd`.
 - `SheetMetalBoltConnectionCmd`, `SheetMetalConnectedPatternCmd`.
 - `SheetMetalUnfoldCmd` for Unfold models.
+- `SheetMetalWeldedMeshCmd` for welded mesh models.
 
 Other modeling features may require additional installed proxy modules. Never
 automatically import code named by an untrusted downloaded document.

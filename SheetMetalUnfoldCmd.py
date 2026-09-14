@@ -213,14 +213,21 @@ def arrangeFlatPatternLinks(links, spacing=10.0):
             link.LinkTransform = False
         link.Placement = FreeCAD.Placement()
         link.Document.recompute()
-        planar_faces = [
-            face for face in link.Shape.Faces
-            if isinstance(face.Surface, Part.Plane)
-        ]
-        if not planar_faces:
+        if link.Shape.isNull():
             continue
-        reference_face = max(planar_faces, key=lambda face: face.Area)
-        normal = reference_face.normalAt(0.0, 0.0)
+        if getattr(link.LinkedObject, "SheetMetalType", "") == "WeldedMeshFlat":
+            # Mesh flats are authored in local XY. Their only planar faces
+            # are wire end caps; centreline previews have no faces at all.
+            normal = z_axis
+        else:
+            planar_faces = [
+                face for face in link.Shape.Faces
+                if isinstance(face.Surface, Part.Plane)
+            ]
+            if not planar_faces:
+                continue
+            reference_face = max(planar_faces, key=lambda face: face.Area)
+            normal = reference_face.normalAt(0.0, 0.0)
         if normal.Length <= SheetMetalTools.smEpsilon:
             continue
         normal.normalize()
@@ -291,6 +298,14 @@ def _isUnfoldObject(obj):
         obj.TypeId != "App::Link"
         and hasattr(obj, "baseObject")
         and hasattr(obj, "UnfoldSketches")
+    )
+
+
+def _isFlatPatternObject(obj):
+    """Manufactured flat representations, excluding forwarding App::Links."""
+    return obj.TypeId != "App::Link" and (
+        _isUnfoldObject(obj)
+        or getattr(obj, "SheetMetalType", "") == "WeldedMeshFlat"
     )
 
 
@@ -1254,6 +1269,10 @@ if SheetMetalTools.isGuiLoaded():
         return [obj for obj in doc.Objects if _isUnfoldObject(obj)]
 
 
+    def _flat_pattern_objects(doc):
+        return [obj for obj in doc.Objects if _isFlatPatternObject(obj)]
+
+
     def _flat_pattern_group(doc, create=False):
         group = doc.getObject("FlatPatterns")
         if group is None and create:
@@ -1292,7 +1311,7 @@ if SheetMetalTools.isGuiLoaded():
 
 
     def _flat_pattern_link(unfold_obj, create=False):
-        if not _isUnfoldObject(unfold_obj):
+        if not _isFlatPatternObject(unfold_obj):
             return None
         group = _flat_pattern_group(unfold_obj.Document, create)
         if group is None:
@@ -1334,7 +1353,7 @@ if SheetMetalTools.isGuiLoaded():
         group = _flat_pattern_group(doc, True)
         links = [
             _flat_pattern_link(unfold_obj, True)
-            for unfold_obj in _unfold_objects(doc)
+            for unfold_obj in _flat_pattern_objects(doc)
         ]
         if group.AutoArrange:
             arrangeFlatPatternLinks(links, group.LayoutSpacing.Value)
@@ -1359,7 +1378,7 @@ if SheetMetalTools.isGuiLoaded():
         group.ViewObject.Visibility = False
         for member in group.Group:
             member.ViewObject.Visibility = False
-        for unfold_obj in _unfold_objects(doc):
+        for unfold_obj in _flat_pattern_objects(doc):
             unfold_obj.ViewObject.Visibility = False
         for entry in group.PreviousVisibility:
             name, separator, value = entry.partition("=")
@@ -1522,7 +1541,7 @@ if SheetMetalTools.isGuiLoaded():
         def IsActive(self):
             return (
                 FreeCAD.ActiveDocument is not None
-                and bool(_unfold_objects(FreeCAD.ActiveDocument))
+                and bool(_flat_pattern_objects(FreeCAD.ActiveDocument))
             )
 
         def IsChecked(self):

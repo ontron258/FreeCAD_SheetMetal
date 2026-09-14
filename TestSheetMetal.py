@@ -32,3 +32,4 @@ from SMTests.testConnectedPattern import TestConnectedPattern
 from SMTests.testMirroredPart import TestMirroredPart
 from SMTests.testProxyRecovery import TestProxyRecovery
 from SMTests.testShapedFlange import TestShapedFlange
+from SMTests.testWeldedMesh import TestWeldedMesh

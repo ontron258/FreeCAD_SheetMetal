@@ -41,7 +41,8 @@ The remotes have distinct roles:
 Branch conventions:
 
 - `master` mirrors `upstream/master`. Do not develop directly on it.
-- `dev` is the integration branch for the complete local feature set.
+- `main` is the default and integration branch for the complete local feature set.
+- `dev` is retained as a historical branch; continue integrated development on `main`.
 - Use focused topic branches when preparing isolated upstream contributions.
 - General collaboration now lives in the independent private repository
   `ontron258/FreeCAD_Collaboration` (local `C:\FreeCAD\FreeCAD_Collaboration`).
@@ -216,4 +217,4 @@ Prefer small, reviewable changes:
 Before proposing a large architecture change upstream, start a design
 discussion. Add documentation and tests expected by the official project, and
 rebase the topic branch onto current `upstream/master`. Keep the full local
-feature set on `dev` even when only selected commits are offered upstream.
+feature set on `main` even when only selected commits are offered upstream.

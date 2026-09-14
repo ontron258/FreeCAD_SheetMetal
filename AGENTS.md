@@ -35,6 +35,11 @@ Branch conventions:
   Rebase that private branch onto `dev` after integrating SheetMetal changes.
 
 Keep commits cohesive and independently understandable. In particular, avoid
+leaving verified changes only on disk: the user requests that code changes be
+committed and pushed to the corresponding development branch on `origin` after
+verification, so the online fork remains a recovery copy. Stage only task-related
+files, use a normal non-force push, and report any authentication or push failure.
+In particular, avoid
 mixing an isolated bug fix with a large UI or object-model change. Do not force
 push, rewrite shared history, open an upstream pull request, or merge into
 `master` unless the user explicitly asks.

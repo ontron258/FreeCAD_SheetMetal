@@ -178,6 +178,23 @@ operation is available on the command line:
 Joining a non-empty document remains supported when it is already an identical
 copy of revision zero; no checkpoint is downloaded in that case.
 
+### Saving a recovery checkpoint
+
+The panel's **Save current as new checkpoint** uploads the current local model
+as a complete FCStd snapshot into a new server session UUID at revision zero,
+then connects this client to that session. Pending and conflicting local edits
+are included deliberately. The old checkpoint, revisions, and validation reports
+remain untouched; other clients must join the new UUID, ideally from an empty
+document. Failed uploads leave the old client session intact. This is a recovery
+baseline, not a geometry-validation result, and it does not save over the local
+source file. The atomic `POST /snapshots` endpoint rejects existing UUIDs.
+
+Environment compatibility uses the exact code-tree digest and runtime versions.
+Git commit metadata remains in lockfiles but is not part of the compatibility
+hash, because desktop launches may not have Git on PATH. The panel derives its
+initial environment from the current runtime rather than a stale saved field.
+Restart clients and validators after updating addon code.
+
 ## Packet addressing
 
 Packets address a mutation using:
@@ -259,7 +276,7 @@ has one upload the checkpoint, has the other restore it, synchronizes an edit,
 compares both client hashes, launches a separate headless validator, and
 requires its independently reconstructed revision to match.
 
-The current suite contains 34 tests. A manual persistent client launcher for
+The current suite contains 38 tests. A manual persistent client launcher for
 local two-window trials is available at `tools/live_collaboration_client.py`;
 it reads the documented `FREECAD_COLLAB_LIVE_*` environment variables and is
 passed to `FreeCAD.exe` as a positional startup script. The launcher preloads

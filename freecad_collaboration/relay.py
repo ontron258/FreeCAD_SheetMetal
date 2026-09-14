@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict
 import json
+import base64
+import uuid
 
 from aiohttp import WSMsgType, web
 
@@ -73,6 +75,25 @@ async def document_head(request):
     except UnknownDocumentError as exc:
         raise web.HTTPNotFound(text=str(exc)) from exc
     return web.json_response(asdict(head))
+
+
+async def create_snapshot(request):
+    try:
+        message = await request.json()
+        document_uid = str(uuid.UUID(message["document_uid"]))
+        checkpoint = base64.b64decode(message["checkpoint"], validate=True)
+        from .checkpoint import is_native_document_archive
+        if not is_native_document_archive(checkpoint):
+            raise ValueError("snapshot must be a complete FCStd archive")
+        head = request.app[STORE_KEY].create_snapshot(
+            document_uid, message["name"], DocumentState.from_dict(message["state"]),
+            checkpoint, environment_id=message.get("environment_id", ""),
+        )
+    except CheckpointConflictError as exc:
+        raise web.HTTPConflict(text=str(exc)) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    return web.json_response(asdict(head), status=201)
 
 
 async def put_checkpoint(request):
@@ -289,6 +310,7 @@ def create_app(store: RevisionStore) -> web.Application:
     application[CLIENTS_KEY] = defaultdict(set)
     application.router.add_get("/health", health)
     application.router.add_post("/documents", register_document)
+    application.router.add_post("/snapshots", create_snapshot)
     application.router.add_get("/documents/{document_uid}/head", document_head)
     application.router.add_put("/documents/{document_uid}/checkpoint", put_checkpoint)
     application.router.add_get("/documents/{document_uid}/checkpoint", get_checkpoint)

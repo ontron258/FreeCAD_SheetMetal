@@ -158,6 +158,8 @@ def environment_lock_id(lock: dict) -> str:
     identity_lock = json.loads(canonical_lock_json(lock))
     for addon in identity_lock.get("addons", []):
         addon.pop("dirty", None)
+        # Git is optional metadata; desktop launches may not have Git on PATH.
+        addon.pop("git_commit", None)
     digest = hashlib.sha256(canonical_lock_json(identity_lock).encode("ascii")).hexdigest()
     return f"lock:{digest}"
 

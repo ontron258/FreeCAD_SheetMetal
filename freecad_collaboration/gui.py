@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import urllib.request
 import uuid
+from contextlib import nullcontext
 
 import FreeCAD as App
 import FreeCADGui as Gui
@@ -14,6 +15,7 @@ from .identity import bootstrap_document, ensure_object_uid
 from .environment import default_environment_id, write_environment_lock
 from .checkpoint import open_checkpoint
 from .qt_session import QtDocumentSession
+from .snapshot import publish_snapshot
 
 
 PREFERENCES_PATH = "User parameter:BaseApp/Preferences/CollaborationPrototype"
@@ -86,6 +88,18 @@ class CollaborationController(QtCore.QObject):
             session.close()
             self.sessionChanged.emit(None)
 
+    def save_current_checkpoint(self, document, base_url, client_id, environment_id):
+        if document is None:
+            raise RuntimeError("Open or create a document first")
+        old_session = self.session_for(document)
+        context = old_session.recorder.suspended() if old_session else nullcontext()
+        # Preserve the old session if upload fails; capture pending local edits.
+        with context:
+            head = publish_snapshot(document, base_url, environment_id)
+        return self.start(
+            document, base_url, client_id, environment_id, head["document_uid"], False
+        )
+
     def close_all(self):
         for session in list(self.sessions.values()):
             session.close()
@@ -138,6 +152,13 @@ class CollaborationPanel(QtWidgets.QWidget):
         buttons.addWidget(self.disconnect_button)
         layout.addLayout(buttons)
 
+        self.checkpoint_button = QtWidgets.QPushButton("Save current as new checkpoint")
+        self.checkpoint_button.setToolTip(
+            "Upload current model into a new session UUID; preserve old history"
+        )
+        layout.addWidget(self.checkpoint_button)
+        self.checkpoint_button.clicked.connect(self._save_current_checkpoint)
+
         self.discard_conflict_button = QtWidgets.QPushButton(
             "Discard conflicting local edits"
         )
@@ -189,7 +210,7 @@ class CollaborationPanel(QtWidgets.QWidget):
         client_id = preferences.GetString("ClientId", "") or _default_client_id()
         self.client.setText(client_id)
         self.environment.setText(
-            preferences.GetString("EnvironmentId", "") or default_environment_id()
+            default_environment_id()
         )
 
     def _save_preferences(self):
@@ -227,6 +248,34 @@ class CollaborationPanel(QtWidgets.QWidget):
         self._bind_session(None)
         self._append("Disconnected")
         self.refresh()
+
+    def _save_current_checkpoint(self):
+        if App.ActiveDocument is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self, "New server checkpoint",
+            "Use the current local model (including pending or conflicting edits) "
+            "as a new server session? Old history is preserved. Other clients must "
+            "join the new UUID. This does not certify that geometry is valid.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        self.checkpoint_button.setEnabled(False)
+        try:
+            self._save_preferences()
+            session = self.controller.save_current_checkpoint(
+                App.ActiveDocument, self.relay.text().strip(), self.client.text().strip(),
+                self.environment.text().strip(),
+            )
+            self.document_uid.setText(session.document_uid)
+            self._append(f"Saved new revision-zero checkpoint: {session.document_uid}")
+            self._append("Other clients must join this new UUID; old history is unchanged")
+        except Exception as exc:
+            self._append(f"Checkpoint ERROR: {exc}")
+        finally:
+            self.refresh()
 
     def _set_selection_locked(self, locked):
         if self.session is None:
@@ -335,6 +384,7 @@ class CollaborationPanel(QtWidgets.QWidget):
         enabled = document is not None and active_session is None
         self.share_button.setEnabled(enabled)
         self.join_button.setEnabled(enabled)
+        self.checkpoint_button.setEnabled(document is not None)
         self.disconnect_button.setEnabled(active_session is not None)
         self.lock_button.setEnabled(active_session is not None)
         self.unlock_button.setEnabled(active_session is not None)

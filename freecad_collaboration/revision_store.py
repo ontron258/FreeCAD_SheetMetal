@@ -238,6 +238,27 @@ class RevisionStore:
         )
         return 0
 
+    def create_snapshot(self, document_uid, name, state, checkpoint, *, environment_id=""):
+        """Atomically create a new baseline, never overwrite an existing session."""
+        if not checkpoint:
+            raise ValueError("checkpoint is empty")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            if self.connection.execute(
+                "SELECT 1 FROM documents WHERE document_uid = ?", (document_uid,)
+            ).fetchone() is not None:
+                raise CheckpointConflictError("snapshot UUID already exists")
+            self.register_document(document_uid, name, state, environment_id=environment_id)
+            self.connection.execute(
+                "UPDATE documents SET checkpoint = ? WHERE document_uid = ?",
+                (bytes(checkpoint), document_uid),
+            )
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
+        return self.document_head(document_uid)
+
     def head_revision(self, document_uid: str) -> int:
         row = self.connection.execute(
             "SELECT head_revision FROM documents WHERE document_uid = ?",

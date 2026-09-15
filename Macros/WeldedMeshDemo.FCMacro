@@ -41,6 +41,8 @@ mesh_demo_part, mesh_demo_formed = create_welded_mesh(
 )
 for mesh_demo_reference in (mesh_demo_carrier, mesh_demo_profile, mesh_demo_base, mesh_demo_bend):
     mesh_demo_reference.ViewObject.Visibility = False
+mesh_demo_part.ViewObject.Visibility = True
+mesh_demo_formed.ViewObject.Visibility = True
 mesh_demo_doc.recompute()
 Gui.activeDocument().activeView().viewAxonometric()
 Gui.activeDocument().activeView().fitAll()

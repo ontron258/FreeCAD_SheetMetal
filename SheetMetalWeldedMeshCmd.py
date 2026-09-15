@@ -120,12 +120,32 @@ class SMMeshDefinition(_TransientProxy):
                 obj.setEditorMode(family + "Pitch", 1 if count else 0)
                 obj.setEditorMode(family + "Offset", 1 if count else 0)
 
+        if (prop in ("LongitudeDiameter", "LatitudeDiameter", "SameDiameter", "WeldPenetration")
+                and all(name in obj.PropertiesList for name in
+                        ("LongitudeDiameter", "LatitudeDiameter", "SameDiameter", "WeldPenetration"))):
+            from SheetMetalMeshPart import sync_envelope
+            sync_envelope(obj)
+
     def surface_map(self, obj):
         from SheetMetalMeshGeometry import MeshSurfaceMap
         source, names = obj.Source
         if source is None or len(names) != 1:
             raise ValueError(translate("SheetMetal", "The forming carrier or reference face is missing."))
         source, face_name = _resolve_carrier_reference(source, names[0])
+        if source.TypeId == "PartDesign::Body" and source.Tip is not None:
+            from SheetMetalMeshPart import SMMeshCarrier
+            if isinstance(getattr(source.Tip, "Proxy", None), SMMeshCarrier):
+                if source.Tip.LastError:
+                    raise ValueError(source.Tip.LastError)
+                face_name = source.Tip.EnvelopeFace
+            elif "CarrierNormal" in obj.PropertiesList:
+                local = _source_shape(source)
+                faces = [(abs((f.CenterOfMass - obj.CarrierPoint).dot(obj.CarrierNormal)), -f.Area, i)
+                         for i, f in enumerate(local.Faces, 1)
+                         if isinstance(f.Surface, Part.Plane)
+                         and f.normalAt(0, 0).dot(obj.CarrierNormal) > 0.999]
+                if faces:
+                    face_name = "Face" + str(min(faces)[2])
         if source is not obj.Source[0] or face_name != names[0]:
             obj.Source = (source, [face_name])
         signature = (source.Shape.hashCode(), face_name, float(obj.KFactor))
@@ -143,8 +163,13 @@ class SMMeshDefinition(_TransientProxy):
                 raise ValueError(translate("SheetMetal", "Wire material density must be positive."))
             mapping = self.surface_map(obj)
             containers = []
-            current = obj.Source[0].getParentGeoFeatureGroup()
+            own_ancestors = set()
+            current = obj.getParentGeoFeatureGroup()
             while current is not None:
+                own_ancestors.add(current)
+                current = current.getParentGeoFeatureGroup()
+            current = obj.Source[0].getParentGeoFeatureGroup()
+            while current is not None and current not in own_ancestors:
                 containers.append(current)
                 current = current.getParentGeoFeatureGroup()
             if list(obj.CarrierContainers) != containers:
@@ -174,8 +199,18 @@ class SMMeshPatternSketch(_TransientProxy):
         _property(obj, "String", "LastError", "Mesh", "Last pattern generation error", "", True)
         obj.Proxy = self
 
+    def onChanged(self, obj, prop):
+        if (prop == "Geometry" and not getattr(self, "_generating", False)
+                and not getattr(obj.Document, "Restoring", False)
+                and getattr(obj, "Definition", None) is not None):
+            obj.Definition.PatternMode = "Editable"
+
     def execute(self, obj):
         from SheetMetalMeshGeometry import generate_lines
+        if obj.Definition is not None and obj.Definition.PatternMode == "Editable":
+            obj.LastError = ""
+            return
+        self._generating = True
         try:
             definition = obj.Definition
             if definition is None or definition.Shape.isNull() or definition.LastError:
@@ -188,8 +223,7 @@ class SMMeshPatternSketch(_TransientProxy):
                 getattr(definition, family + "Margin").Value,
                 getattr(definition, family + "Offset").Value,
             )
-            # A generated SketchObjectPython owns only its own geometry. The
-            # editable copies are ordinary sketches, never rewritten here.
+            # The same sketches are rebuilt only in generated mode.
             if obj.GeometryCount:
                 obj.delGeometries(list(range(obj.GeometryCount)))
             if lines:
@@ -200,6 +234,8 @@ class SMMeshPatternSketch(_TransientProxy):
                 obj.delGeometries(list(range(obj.GeometryCount)))
             obj.LastError = str(error)
             App.Console.PrintError("Welded mesh pattern: {}\n".format(error))
+        finally:
+            self._generating = False
 
 
 class SMWeldedMesh(_TransientProxy):
@@ -208,9 +244,7 @@ class SMWeldedMesh(_TransientProxy):
         _property(obj, "Link", "Definition", "Mesh", "Mesh settings and forming carrier", definition, True)
         for family, sketch in zip(FAMILIES, (longitude, latitude)):
             _property(obj, "Link", family + "Sketch", "Mesh", "Flat wire centreline input", sketch, True)
-            _property(obj, "String", "Generated" + family, "Mesh", "Original generated sketch name", sketch.Name, True)
             _property(obj, "Integer", family + "WireCount", "Results", "Actual wire pieces after trimming", 0, True)
-            obj.setEditorMode("Generated" + family, 2)
         _property(obj, "PartShape", "FlatShape", "Results", "Derived flat wire representation", readonly=True)
         obj.setEditorMode("FlatShape", 2)
         _property(obj, "Length", "FlatWireLength", "Results", "Total centreline length of the flat preparation", 0.0, True)
@@ -262,6 +296,9 @@ class SMWeldedMesh(_TransientProxy):
             # the source transform on the feature rather than the compound.
             obj.Shape = result
             placement = source.getGlobalPlacement()
+            parent = obj.getParentGeoFeatureGroup()
+            if parent is not None:
+                placement = parent.getGlobalPlacement().inverse() * placement
             if obj.Placement != placement:
                 obj.Placement = placement
             obj.FlatShape = Part.makeCompound(flat) if flat else Part.Shape()
@@ -293,7 +330,8 @@ class SMMeshFlat(_TransientProxy):
 
 def create_welded_mesh(doc, source, face_name, **parameters):
     """Create a product. Call inside a transaction for interactive undo."""
-    from SheetMetalMeshGeometry import MeshSurfaceMap
+    from SheetMetalMeshGeometry import MeshSurfaceMap, mesh_layers
+    from SheetMetalMeshPart import prepare_carrier, SMMeshSheetFlat
     source, face_name = _resolve_carrier_reference(source, face_name)
     if source.Document is not doc:
         raise ValueError(translate("SheetMetal", "The carrier must belong to the active document."))
@@ -301,14 +339,40 @@ def create_welded_mesh(doc, source, face_name, **parameters):
     k_factor = float(getattr(carrier_part, "KFactor", 0.5))
     # Check the reference before adding document objects.
     mapping = MeshSurfaceMap(_source_shape(source), face_name, parameters.get("KFactor", k_factor))
-    part = doc.addObject("App::Part", "WeldedMeshPart")
-    part.Label = translate("SheetMetal", "Welded Mesh Part")
-    _property(part, "String", "SheetMetalType", "Mesh", "Manufactured part type", "WeldedMeshPart", True)
-    _property(part, "String", "Tip", "Mesh", "Formed feature name", "", True)
-    _property(part, "String", "FlatPattern", "Mesh", "Flat representation name", "", True)
+    original_source = source
+    dl = parameters.get("LongitudeDiameter", 2.0)
+    dt = dl if parameters.get("SameDiameter", True) else parameters.get("LatitudeDiameter", 2.0)
+    thickness, _ = mesh_layers(dl, dt, parameters.get("WeldPenetration", 0.3))
+    reference_normal = mapping.root_face.normalAt(0, 0)
+    reference_point = mapping.root_face.CenterOfMass
+    part, source = prepare_carrier(doc, source, face_name, thickness)
+    # A Body publishes its current Tip. Resolve the selected face on that
+    # representation by geometry, since a selected earlier feature may differ.
+    if source.Shape.isNull():
+        raise ValueError(translate("SheetMetal", "The sheet-metal Body has no current solid."))
+    if original_source is not source:
+        selected = original_source.Shape.getElement(face_name)
+        candidates = [(f.CenterOfMass.distanceToPoint(selected.CenterOfMass), i)
+                      for i, f in enumerate(source.Shape.Faces, 1)
+                      if isinstance(f.Surface, Part.Plane)
+                      and abs(f.Area - selected.Area) < 1e-5]
+        if candidates:
+            face_name = "Face" + str(min(candidates)[1])
+    if hasattr(source.Tip, "EnvelopeFace"):
+        face_name = source.Tip.EnvelopeFace
+    else:
+        faces = [(abs((f.CenterOfMass - reference_point).dot(reference_normal)), -f.Area, i)
+                 for i, f in enumerate(_source_shape(source).Faces, 1)
+                 if isinstance(f.Surface, Part.Plane) and f.normalAt(0, 0).dot(reference_normal) > 0.999]
+        face_name = "Face" + str(min(faces)[2])
+    mapping = MeshSurfaceMap(_source_shape(source), face_name, parameters.get("KFactor", k_factor))
     definition = doc.addObject("Part::FeaturePython", "MeshDefinition")
     definition.Label = translate("SheetMetal", "Mesh Parameters and Boundary")
     SMMeshDefinition(definition)
+    _property(definition, "Vector", "CarrierNormal", "Carrier", "Reference side normal in the Body", mapping.root_face.normalAt(0, 0), True)
+    _property(definition, "Vector", "CarrierPoint", "Carrier", "Reference side point in the Body", mapping.root_face.CenterOfMass, True)
+    for internal in ("CarrierNormal", "CarrierPoint"):
+        definition.setEditorMode(internal, 2)
     definition.Source = (source, [face_name])
     definition.KFactor = k_factor
     definition.Proxy._mapping = mapping
@@ -316,6 +380,7 @@ def create_welded_mesh(doc, source, face_name, **parameters):
     if carrier_part is not None:
         definition.Density = carrier_part.Density
         definition.Material = str(getattr(carrier_part, "BaseMaterial", "Steel wire"))
+    definition.SameDiameter = parameters.get("SameDiameter", True)
     for name, value in parameters.items():
         if name not in definition.PropertiesList or name in ("Source", "Shape", "Proxy", "PatternMode"):
             raise ValueError("Unknown mesh parameter: " + name)
@@ -324,19 +389,23 @@ def create_welded_mesh(doc, source, face_name, **parameters):
     sketches = []
     for family in FAMILIES:
         sketch = doc.addObject("Sketcher::SketchObjectPython", family + "Pattern")
-        sketch.Label = translate("SheetMetal", "%1 Wires (Generated)").replace("%1", family)
+        sketch.Label = translate("SheetMetal", "%1 Wires").replace("%1", family)
         SMMeshPatternSketch(sketch, definition, family)
         part.addObject(sketch)
         sketches.append(sketch)
     mesh = doc.addObject("Part::FeaturePython", "WeldedMesh")
-    mesh.Label = translate("SheetMetal", "Formed Mesh")
+    mesh.Label = translate("SheetMetal", "Formed Wires")
     SMWeldedMesh(mesh, definition, *sketches)
     part.addObject(mesh)
     flat = doc.addObject("Part::FeaturePython", "WeldedMeshFlat")
-    flat.Label = translate("SheetMetal", "Flat Mesh")
+    flat.Label = translate("SheetMetal", "Flat Wires")
     SMMeshFlat(flat, mesh)
     part.addObject(flat)
-    part.Tip, part.FlatPattern = mesh.Name, flat.Name
+    sheet_flat = doc.addObject("Part::FeaturePython", "MeshSheetFlat")
+    sheet_flat.Label = translate("SheetMetal", "Flat Sheet Metal")
+    SMMeshSheetFlat(sheet_flat, definition)
+    part.addObject(sheet_flat)
+    part.FormedWire, part.FlatPattern, part.FlatSheetMetal = mesh.Name, flat.Name, sheet_flat.Name
     _property(part, "Mass", "Weight", "Results", "Mass of the flat wire stock", 0.0, True)
     part.setExpression("Weight", mesh.Name + ".Weight")
     _property(part, "Length", "MeshThickness", "Results", "Welded envelope thickness", 0.0, True)
@@ -348,67 +417,51 @@ def create_welded_mesh(doc, source, face_name, **parameters):
         MeshViewProvider(mesh.ViewObject)
         MeshViewProvider(definition.ViewObject)
         MeshFlatViewProvider(flat.ViewObject)
+        MeshFlatViewProvider(sheet_flat.ViewObject)
         for sketch in sketches:
-            GeneratedSketchViewProvider(sketch.ViewObject)
+            # Keep native Sketcher editing. The feature detects manual geometry
+            # changes and switches the shared pattern mode before recomputing.
+            sketch.ViewObject.Proxy = None
         definition.ViewObject.Visibility = False
         for sketch in sketches:
             sketch.ViewObject.Visibility = False
         flat.ViewObject.Visibility = False
+        sheet_flat.ViewObject.Visibility = False
         source.ViewObject.Visibility = False
+        for feature in source.Group:
+            feature.ViewObject.Visibility = False
+        original_source.ViewObject.Visibility = False
         mesh.ViewObject.ShapeColor = (0.72, 0.74, 0.77)
+        from SheetMetalMeshPart import show_representation
+        show_representation(part)
     return part, mesh
 
 
 def convert_to_editable(mesh):
-    """Make normal Sketcher copies once; recomputes never write to them."""
-    if mesh.Definition.PatternMode == "Editable":
-        return [getattr(mesh, f + "Sketch") for f in FAMILIES]
-    if mesh.LastError:
-        raise ValueError(mesh.LastError)
-    doc = mesh.Document
-    part = mesh.getParentGeoFeatureGroup()
-    result = []
-    for family in FAMILIES:
-        original = getattr(mesh, family + "Sketch")
-        sketch = doc.addObject("Sketcher::SketchObject", family + "Wires")
-        sketch.Label = translate("SheetMetal", "%1 Wires (Editable)").replace("%1", family)
-        if original.GeometryCount:
-            sketch.addGeometry(list(original.Geometry), False)
-        sketch.Placement = original.Placement
-        part.addObject(sketch)
-        setattr(mesh, family + "Sketch", sketch)
-        if SheetMetalTools.isGuiLoaded():
-            original.ViewObject.Visibility = False
-            sketch.ViewObject.Visibility = False
-        result.append(sketch)
+    """Freeze the active sketch pair without duplicating it."""
     mesh.Definition.PatternMode = "Editable"
-    doc.recompute()
-    return result
+    mesh.Document.recompute()
+    return [getattr(mesh, family + "Sketch") for family in FAMILIES]
 
 
 def regenerate_pattern(mesh):
-    """Switch back to generated inputs, retaining every editable sketch."""
-    sketches = [mesh.Document.getObject(getattr(mesh, "Generated" + f)) for f in FAMILIES]
-    if any(s is None for s in sketches):
-        raise ValueError(translate("SheetMetal", "An original generated sketch is missing."))
-    for family, sketch in zip(FAMILIES, sketches):
-        old = getattr(mesh, family + "Sketch")
-        if old is not sketch and SheetMetalTools.isGuiLoaded():
-            old.ViewObject.Visibility = False
-        setattr(mesh, family + "Sketch", sketch)
+    """Explicitly regenerate the active pair; document transactions provide undo."""
     mesh.Definition.PatternMode = "Generated"
+    for family in FAMILIES:
+        getattr(mesh, family + "Sketch").touch()
     mesh.Document.recompute()
 
 
 def find_mesh(obj):
+    from SheetMetalMeshPart import is_mesh_part
     if obj is None:
         return None
     if getattr(obj, "SheetMetalType", "") == "WeldedMesh":
         return obj
     if getattr(obj, "SheetMetalType", "") == "WeldedMeshFlat":
         return obj.Mesh
-    if getattr(obj, "SheetMetalType", "") == "WeldedMeshPart":
-        return obj.Document.getObject(obj.Tip)
+    if is_mesh_part(obj):
+        return obj.Document.getObject(obj.FormedWire)
     parent = obj.getParentGeoFeatureGroup()
     return find_mesh(parent) if parent is not None else None
 
@@ -422,8 +475,6 @@ if SheetMetalTools.isGuiLoaded():
             return ICON
 
         def claimChildren(self):
-            if getattr(self.Object, "SheetMetalType", "") == "WeldedMesh":
-                return [self.Object.Definition, self.Object.LongitudeSketch, self.Object.LatitudeSketch]
             return []
 
         def getTaskPanel(self, obj):
@@ -447,7 +498,7 @@ if SheetMetalTools.isGuiLoaded():
             if mesh is not None:
                 action = menu.addAction(translate("SheetMetal", "Make wire sketches editable"))
                 action.triggered.connect(lambda: _edit_pattern(mesh, False))
-                action = menu.addAction(translate("SheetMetal", "Regenerate wire pattern (keep edited sketches)"))
+                action = menu.addAction(translate("SheetMetal", "Regenerate wire pattern"))
                 action.triggered.connect(lambda: _edit_pattern(mesh, True))
 
     class MeshFlatViewProvider(SheetMetalTools.SMViewProvider):
@@ -456,18 +507,6 @@ if SheetMetalTools.isGuiLoaded():
 
         def claimChildren(self):
             return []
-
-    class GeneratedSketchViewProvider(SheetMetalTools.SMViewProvider):
-        def getIcon(self):
-            return ICON
-
-        def doubleClicked(self, vobj):
-            _edit_pattern(find_mesh(vobj.Object), False)
-            return True
-
-        def setEdit(self, vobj, mode):
-            _edit_pattern(find_mesh(vobj.Object), False)
-            return False
 
     class MeshTaskPanel:
         def __init__(self, mesh):

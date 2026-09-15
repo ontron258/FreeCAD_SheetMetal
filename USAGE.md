@@ -85,6 +85,9 @@ Do not edit an installed copy instead of the source repository.
 
 For wire parts, see [Welded mesh parts](WELDED_MESH.md) for creating formed and
 flat mesh, setting wire spacing and weld penetration, and editing the wire sketches.
+Each new mesh product owns one sheet-metal Body with the full wire-envelope
+thickness, formed/flat wire views, a flat sheet view and one longitude/latitude
+sketch pair. Switch the part's **Representation** property to inspect each view.
 
 Existing saved Python-feature documents depend on their original proxy classes
 and properties. Keep the addon installed when reopening them; do not rename

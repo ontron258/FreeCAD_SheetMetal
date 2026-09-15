@@ -377,6 +377,11 @@ def updatePartWeight(part):
         name in part.PropertiesList for name in ("Density", "Weight")
     ):
         return 0.0
+    # A mesh product owns a sheet-metal Body for modelling, but its purchased
+    # stock is wire. Preserve the mesh-derived Weight expression.
+    if getattr(part, "MeshType", "") == "WeldedMesh":
+        mesh = part.Document.getObject(getattr(part, "FormedWire", ""))
+        return float(mesh.Weight.Value) if mesh is not None else 0.0
     shape = _shape_from_part_tip(part)
     volume = 0.0
     if shape is not None and not shape.isNull():
@@ -403,7 +408,8 @@ def applyMaterialDefaults(part, create_configuration=False):
     defaults = standardSheetMetalParameters(material, str(part.SheetSize))
     if part.EffectiveMaterial != defaults["material"]:
         part.EffectiveMaterial = defaults["material"]
-    if abs(part.Thickness.Value - defaults["thickness"]) > 1.0e-9:
+    if (getattr(part, "MeshType", "") != "WeldedMesh"
+            and abs(part.Thickness.Value - defaults["thickness"]) > 1.0e-9):
         part.Thickness = defaults["thickness"]
     if (
         part.UseStandardBendRadius

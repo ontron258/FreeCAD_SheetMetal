@@ -9,18 +9,23 @@ import Sketcher
 
 from SheetMetalBaseCmd import SMBaseBend
 from SheetMetalCmd import SMBendWall
+from SheetMetalShapedFlangeCmd import createSheetMetalPart
 from SheetMetalWeldedMeshCmd import create_welded_mesh, convert_to_editable
 
 
 def create_mesh_tray_demo():
     doc = App.newDocument("WeldedMeshTray")
     doc.Label = "Welded mesh tray - flanges and cutouts"
-    carrier = doc.addObject("App::Part", "FormingReference")
-    carrier.Label = "Forming reference - expand to edit flanges and cuts"
+    carrier = createSheetMetalPart(doc)
+    carrier.UseMaterialCatalog = False
+    carrier.Thickness = 3.7
+    carrier.DefaultBendRadius = 6
+    body = doc.addObject("PartDesign::Body", "SheetMetalBody")
+    carrier.addObject(body)
 
     profile = doc.addObject("Sketcher::SketchObject", "FloorProfile")
     profile.Label = "Floor profile - 180 x 120 mm"
-    carrier.addObject(profile)
+    body.addObject(profile)
     points = [App.Vector(0, 0, 0), App.Vector(180, 0, 0),
               App.Vector(180, 120, 0), App.Vector(0, 120, 0)]
     profile.addGeometry([Part.LineSegment(points[i], points[(i + 1) % 4])
@@ -34,11 +39,12 @@ def create_mesh_tray_demo():
     profile.renameConstraint(width, "FloorWidth")
     profile.renameConstraint(depth, "FloorDepth")
 
-    base = doc.addObject("Part::FeaturePython", "CarrierBase")
-    carrier.addObject(base)
+    base = body.newObject("PartDesign::FeaturePython", "CarrierBase")
     SMBaseBend(base, profile)
-    base.Label = "Base carrier - 1.5 mm reference thickness"
-    base.Thickness = 1.5
+    base.Label = "Sheet envelope - thickness follows wire settings"
+    base.Thickness = 3.7
+    base.UsePartThickness = True
+    base.PartDefaultsVersion = 1
     base.Radius = 6
     base.BendSide = "Outside"
     doc.recompute()
@@ -57,10 +63,9 @@ def create_mesh_tray_demo():
         edges = [(i, edge) for i, edge in enumerate(source.Shape.Edges)
                  if len(edge.Vertexes) == 2 and all(
                      abs(getattr(v.Point, axis) - position) < 1e-6
-                     and abs(v.Point.z - 1.5) < 1e-6 for v in edge.Vertexes)]
+                     and abs(v.Point.z - carrier.Thickness.Value) < 1e-6 for v in edge.Vertexes)]
         index, _edge = max(edges, key=lambda item: item[1].Length)
-        flange = doc.addObject("Part::FeaturePython", name)
-        carrier.addObject(flange)
+        flange = body.newObject("PartDesign::FeaturePython", name)
         SMBendWall(flange, source, ["Edge" + str(index + 1)])
         flange.Label = "{} - {} mm straight leg, R6, 90 deg".format(name, length)
         flange.radius = 6
@@ -76,34 +81,33 @@ def create_mesh_tray_demo():
             SMViewProviderTree(flange.ViewObject)
         source = flange
 
-    def box_tool(name, label, size, origin):
-        tool = doc.addObject("Part::Box", name)
-        tool.Label = label
-        carrier.addObject(tool)
-        tool.Length, tool.Width, tool.Height = size
-        tool.Placement.Base = App.Vector(*origin)
-        return tool
+    def rectangle(x, y, width, height):
+        p = [App.Vector(x, y, 0), App.Vector(x + width, y, 0),
+             App.Vector(x + width, y + height, 0), App.Vector(x, y + height, 0)]
+        return [Part.LineSegment(p[i], p[(i + 1) % 4]) for i in range(4)]
 
-    tools = [box_tool("FloorWindowTool", "Floor window tool - 60 x 30 mm",
-                      (60, 30, 5), (85, 40, -1))]
-    circular = doc.addObject("Part::Cylinder", "RoundOpeningTool")
-    circular.Label = "Round opening tool - diameter 24 mm"
-    carrier.addObject(circular)
-    circular.Radius, circular.Height = 12, 5
-    circular.Placement.Base = App.Vector(36, 55, -1)
-    tools.append(circular)
-    tools.append(box_tool("FrontNotchTool", "Front edge notch tool - 28 x 14 mm",
-                          (28, 19, 5), (110, -5, -1)))
-    tools.append(box_tool("HandleSlotTool", "Back handle tool - 50 x 14 mm",
-                          (50, 16, 14), (65, 118, 22)))
-    for name, tool in zip(("FloorWindow", "RoundOpening", "FrontNotch", "HandleSlot"), tools):
-        cut = doc.addObject("Part::Cut", name)
-        carrier.addObject(cut)
-        cut.Base, cut.Tool = source, tool
+    cuts = [
+        ("FloorWindow", rectangle(85, 40, 60, 30)),
+        ("RoundOpening", [Part.Circle(App.Vector(36, 55, 0), App.Vector(0, 0, 1), 12)]),
+        ("FrontNotch", rectangle(110, -5, 28, 19)),
+        ("HandleSlot", rectangle(65, -36, 50, 14)),
+    ]
+    for name, geometry in cuts:
+        sketch = body.newObject("Sketcher::SketchObject", name + "Profile")
+        sketch.addGeometry(geometry, False)
+        if name == "HandleSlot":
+            sketch.Placement = App.Placement(App.Vector(0, 140, 0), App.Rotation(App.Vector(1, 0, 0), -90))
+        else:
+            sketch.setExpression("Placement.Base.z", base.Name + ".Thickness")
+        cut = body.newObject("PartDesign::Pocket", name)
+        cut.Profile = sketch
+        cut.Type = 1  # Through all, including after an envelope-thickness change.
         cut.Refine = True
         doc.recompute()
         source = cut
-    source.Label = "Finished carrier - three flanges and four cuts"
+    source.Label = "Handle slot - finished sheet envelope"
+    body.Tip = source
+    carrier.Tip = source.Name
     if not source.Shape.isValid() or len(source.Shape.Solids) != 1:
         raise ValueError("The demonstration carrier must be one valid solid.")
 
@@ -131,8 +135,8 @@ def create_mesh_tray_demo():
         "2 mm wire, initial 10 mm pitch, 0.3 mm weld penetration gives a 3.7 mm welded envelope.",
         "Both wire sketches are editable. One longitude wire has been shortened by 4 mm at one end.",
         "Toggle Flat Pattern Workspace to inspect the preparation; double-click a wire sketch to edit it.",
-        "Pitch/count apply after Regenerate wire pattern (keep edited sketches) on Formed Mesh.",
-        "Show the finished carrier and its parent to inspect the forming reference; hide the mesh first.",
+        "Pitch/count apply after Regenerate wire pattern on Formed Wires; undo restores edits.",
+        "The single Body holds the editable flanges and pockets; its 3.7 mm thickness is the wire envelope.",
         "Carrier allowance is geometric. Flat and formed wire lengths can differ around bends.",
     ]
     doc.recompute()

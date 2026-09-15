@@ -145,6 +145,21 @@ their owning Sheet Metal Part and consume its thickness. Their
 Workspace link placement is presentation state. Manufacturing export and future
 drawings should reference the real Unfold geometry, not the arranged links.
 
+### Welded mesh products
+
+New mesh products are Sheet Metal `App::Part` containers with `MeshType = WeldedMesh`.
+One `PartDesign::Body` is the primary sheet representation. Its thickness follows
+`longitude diameter + latitude diameter - weld penetration`. `FormedWire`,
+`FlatPattern`, `FlatSheetMetal` and `SheetMetalBody` store object names, not links
+back to children. Part `Tip` remains the sheet feature; `Weight` remains wire stock
+weight. Keep envelope parameter synchronization free of dependency cycles.
+
+`SheetMetalMeshPart.py` manages ownership and imported-carrier envelopes. New
+products use one longitude/latitude sketch pair; generated and editable are modes
+of those same sketches. Regeneration replaces their geometry in an undo transaction.
+Welded mesh is an unused-in-production prototype. Do not add compatibility or
+migration paths for earlier mesh schemas; update the examples to the current model.
+
 ### Shared helpers
 
 `SheetMetalTools.py` is widely used by the workbench. Keep changes there small

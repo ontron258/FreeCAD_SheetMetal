@@ -18,6 +18,7 @@ from SheetMetalWeldedMeshCmd import (
 )
 from SheetMetalUnfoldCmd import _isFlatPatternObject, _isUnfoldObject, arrangeFlatPatternLinks
 from SheetMetalNewUnfolder import BendAllowanceCalculator, unfold
+from SheetMetalMeshPart import is_mesh_part
 from SMTests.testBendData import _two_bend_part
 
 
@@ -100,6 +101,82 @@ class TestWeldedMesh(unittest.TestCase):
         self.assertAlmostEqual(3.4, mesh.Shape.BoundBox.ZLength)
         self.assertAlmostEqual(expected_mass, mesh.Weight.Value)
 
+    def test_one_part_owns_body_flats_and_one_active_sketch_pair(self):
+        source, part, mesh = self.mesh()
+        self.assertTrue(is_mesh_part(part))
+        self.assertEqual(1, len([o for o in self.doc.Objects if o.TypeId == "App::Part"]))
+        body = self.doc.getObject(part.SheetMetalBody)
+        self.assertEqual([body], [o for o in part.Group if o.TypeId == "PartDesign::Body"])
+        self.assertIs(body, mesh.Definition.Source[0])
+        self.assertEqual(body.Tip.Name, part.Tip)
+        for name in (part.FormedWire, part.FlatPattern, part.FlatSheetMetal):
+            self.assertIs(self.doc.getObject(name).getParentGeoFeatureGroup(), part)
+        before = [mesh.LongitudeSketch, mesh.LatitudeSketch]
+        self.assertEqual(before, convert_to_editable(mesh))
+        self.assertEqual(2, len([o for o in part.Group if o.isDerivedFrom("Sketcher::SketchObject")]))
+        self.assertIs(source.getParentGeoFeatureGroup(), part)
+
+    def test_body_and_sheet_flat_follow_full_welded_envelope(self):
+        _source, part, mesh = self.mesh()
+        body = self.doc.getObject(part.SheetMetalBody)
+        flat = self.doc.getObject(part.FlatSheetMetal)
+        for diameter, penetration, expected in [(2, 0.3, 3.7), (3, 0.5, 5.5)]:
+            mesh.Definition.LongitudeDiameter = diameter
+            mesh.Definition.WeldPenetration = penetration
+            self.doc.recompute()
+            self.assert_valid_mesh(mesh)
+            self.assertTrue(body.Shape.isValid())
+            self.assertTrue(flat.Shape.isValid())
+            self.assertAlmostEqual(expected, part.Thickness.Value)
+            self.assertAlmostEqual(expected, body.Shape.BoundBox.ZLength)
+            self.assertAlmostEqual(expected, flat.Shape.BoundBox.ZLength)
+            self.assertAlmostEqual(body.Shape.BoundBox.ZMin, mesh.Shape.BoundBox.ZMin)
+            self.assertAlmostEqual(body.Shape.BoundBox.ZMax, mesh.Shape.BoundBox.ZMax)
+
+    def test_editing_the_generated_sketch_switches_to_manual_in_place(self):
+        _source, _part, mesh = self.mesh()
+        sketch = mesh.LongitudeSketch
+        sketch.delGeometry(0)
+        self.doc.recompute()
+        self.assertEqual("Editable", mesh.Definition.PatternMode)
+        self.assertIs(sketch, mesh.LongitudeSketch)
+        self.assertEqual(3, mesh.LongitudeWireCount)
+
+    def test_native_body_is_reused_and_its_new_tip_drives_all_views(self):
+        body = self.doc.addObject("PartDesign::Body", "CarrierBody")
+        feature = body.newObject("PartDesign::Feature", "CarrierSolid")
+        feature.Shape = Part.makeBox(60, 40, 1.5)
+        self.doc.recompute()
+        part, mesh = create_welded_mesh(self.doc, body, self.top_face(body.Shape))
+        self.assertEqual(body.Name, part.SheetMetalBody)
+        self.assertAlmostEqual(3.7, body.Shape.BoundBox.ZLength)
+        before = mesh.FlatWireLength.Value
+        # A later operation remains in the same Body and becomes the source.
+        cut = body.newObject("PartDesign::Feature", "LaterCut")
+        cut.Shape = body.Tip.Shape if body.Tip is not cut else mesh.Definition.Source[0].Shape
+        cut.Shape = cut.Shape.cut(Part.makeCylinder(10, 10, App.Vector(30, 20, -3)))
+        body.Tip = cut
+        self.doc.recompute()
+        self.assertEqual(cut.Name, part.Tip)
+        self.assert_valid_mesh(mesh)
+        self.assertLess(mesh.FlatWireLength.Value, before)
+
+    def test_generated_pair_remains_generated_after_restore(self):
+        _source, _part, mesh = self.mesh()
+        name = mesh.Name
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "GeneratedMesh.FCStd")
+            self.doc.saveAs(path)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            mesh = self.doc.getObject(name)
+            self.assertEqual("Generated", mesh.Definition.PatternMode)
+            mesh.Definition.LongitudePitch = 5
+            self.doc.recompute()
+            self.assertEqual("Generated", mesh.Definition.PatternMode)
+            self.assertGreater(mesh.LongitudeWireCount, 4)
+            self.assert_valid_mesh(mesh)
+
     def test_count_and_independent_diameters(self):
         _source, _part, mesh = self.mesh(LongitudeMode="Count", LongitudeCount=1,
                                        LatitudeMode="Count", LatitudeCount=3,
@@ -144,7 +221,7 @@ class TestWeldedMesh(unittest.TestCase):
         self.assertEqual(4, mesh.LongitudeWireCount)
         self.assertEqual("Editable", mesh.Definition.PatternMode)
 
-    def test_regeneration_preserves_custom_sketches_and_is_undoable(self):
+    def test_regeneration_reuses_pair_and_is_undoable(self):
         _source, _part, mesh = self.mesh()
         self.doc.UndoMode = 1
         longitude, latitude = convert_to_editable(mesh)
@@ -154,14 +231,17 @@ class TestWeldedMesh(unittest.TestCase):
         regenerate_pattern(mesh)
         self.doc.commitTransaction()
         self.assertEqual("Generated", mesh.Definition.PatternMode)
-        self.assertIsNot(mesh.LongitudeSketch, longitude)
+        self.assertIs(mesh.LongitudeSketch, longitude)
         self.assertIs(self.doc.getObject(longitude.Name), longitude)
-        self.assertEqual(3, longitude.GeometryCount)
+        self.assertEqual(4, longitude.GeometryCount)
         self.doc.undo()
         self.doc.recompute()
         self.assertIs(mesh.LongitudeSketch, longitude)
         self.assertIs(mesh.LatitudeSketch, latitude)
         self.assertEqual("Editable", mesh.Definition.PatternMode)
+        self.assertEqual(3, longitude.GeometryCount)
+        self.assertEqual(2, len([o for o in mesh.getParentGeoFeatureGroup().Group
+                                 if o.isDerivedFrom("Sketcher::SketchObject")]))
 
     def test_manual_diagonal_and_construction_lines(self):
         _source, _part, mesh = self.mesh()
@@ -287,7 +367,7 @@ class TestWeldedMesh(unittest.TestCase):
             mesh = self.doc.getObject(mesh_name)
             self.assertIsInstance(mesh.Proxy, SMWeldedMesh)
             self.assertIsInstance(mesh.Definition.Proxy, SMMeshDefinition)
-            self.assertIsInstance(self.doc.getObject(mesh.GeneratedLatitude).Proxy, SMMeshPatternSketch)
+            self.assertIsInstance(mesh.LatitudeSketch.Proxy, SMMeshPatternSketch)
             mesh.Definition.touch()
             self.doc.recompute()
             self.assert_valid_mesh(mesh)
@@ -329,18 +409,22 @@ class TestWeldedMesh(unittest.TestCase):
         parent.addObject(source)
         _part, mesh = create_welded_mesh(self.doc, source, face_name)
         self.assertIs(source.getParentGeoFeatureGroup(), parent)
-        self.assertEqual([source], list(parent.Group))
-        before = mesh.Shape.BoundBox.XMin
+        self.assertIs(_part, parent)
+        self.assertEqual(1, len([o for o in parent.Group if o.TypeId == "PartDesign::Body"]))
+        self.assertNotIn(parent, mesh.Definition.OutList)
+        before = mesh.getGlobalPlacement().Base.x
         parent.Placement.Base = App.Vector(100, 0, 0)
         self.doc.recompute()
-        self.assertAlmostEqual(before + 100, mesh.Shape.BoundBox.XMin, places=5)
+        self.assertAlmostEqual(before + 100, mesh.getGlobalPlacement().Base.x, places=5)
 
     def test_carrier_face_selected_through_part_container(self):
         source, face_name = self.carrier()
         parent = self.doc.addObject("App::Part", "CarrierAssembly")
         parent.addObject(source)
         _part, mesh = create_welded_mesh(self.doc, parent, source.Name + "." + face_name)
-        self.assertIs(mesh.Definition.Source[0], source)
+        body = self.doc.getObject(_part.SheetMetalBody)
+        self.assertIs(mesh.Definition.Source[0], body)
+        self.assertIs(body.Tip.Source, source)
         self.assertIs(source.getParentGeoFeatureGroup(), parent)
         self.assert_valid_mesh(mesh)
 

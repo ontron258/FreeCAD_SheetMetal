@@ -305,7 +305,7 @@ def _isFlatPatternObject(obj):
     """Manufactured flat representations, excluding forwarding App::Links."""
     return obj.TypeId != "App::Link" and (
         _isUnfoldObject(obj)
-        or getattr(obj, "SheetMetalType", "") == "WeldedMeshFlat"
+        or getattr(obj, "SheetMetalType", "") in ("WeldedMeshFlat", "WeldedMeshSheetFlat")
     )
 
 
@@ -1325,9 +1325,10 @@ if SheetMetalTools.isGuiLoaded():
         link.LinkedObject = unfold_obj
         owner_part = _containing_app_part(unfold_obj)
         owner_label = owner_part.Label if owner_part is not None else unfold_obj.Label
-        link.Label = translate("SheetMetal", "%1 Flat Pattern").replace(
-            "%1", owner_label
-        )
+        if getattr(unfold_obj, "SheetMetalType", "") in ("WeldedMeshFlat", "WeldedMeshSheetFlat"):
+            link.Label = owner_label + " - " + unfold_obj.Label
+        else:
+            link.Label = translate("SheetMetal", "%1 Flat Pattern").replace("%1", owner_label)
         group.addObject(link)
         link.ViewObject.Visibility = False
         return link

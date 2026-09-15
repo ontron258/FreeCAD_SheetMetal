@@ -96,6 +96,25 @@ Each new mesh product owns one sheet-metal Body with the full wire-envelope
 thickness, formed/flat wire views, a flat sheet view and one longitude/latitude
 sketch pair. Switch the part's **Representation** property to inspect each view.
 
+### Corner Round / Chamfer
+
+After creating the walls and bends, Ctrl-select one or more sharp outline corner
+vertices on the final sheet feature. You can also select the straight, short
+edges running through the sheet thickness. Choose **Sheet Metal → Corner Round /
+Chamfer** from the menu or toolbar, then choose **Round** and a **Radius**, or
+**Chamfer** and a **Chamfer distance** (equal setback along both sides).
+
+Use **Select corners** to edit the set, then **Preview** to apply it. All corners
+in one feature share its size; add another feature for a different size. Selecting
+both ends of the same corner counts once. The feature preserves sheet thickness
+and supports corners on different planar flanges of one solid. Bend edges,
+already rounded corners, and selections from multiple objects are rejected.
+Reduce the size if neighboring corners or bends leave insufficient room.
+
+Double-click the feature to change its selection, treatment, or dimensions.
+Apply this finishing feature after cumulative Face operations, and unfold the
+finished result. Restart FreeCAD after installing the new command module.
+
 Existing saved Python-feature documents depend on their original proxy classes
 and properties. Keep the addon installed when reopening them; do not rename
 serialized classes/properties casually. See [AGENTS.md](AGENTS.md) for the

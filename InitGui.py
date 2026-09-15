@@ -67,6 +67,7 @@ class SMWorkbench(Workbench):
         import SheetMetalCmd
         import SheetMetalHem
         import SheetMetalCornerReliefCmd
+        import SheetMetalCornerTreatmentCmd
         import SheetMetalExtendCmd
         import SheetMetalFoldCmd
         import SheetMetalFormingCmd
@@ -97,6 +98,7 @@ class SMWorkbench(Workbench):
             "SheetMetal_ToggleFlatPatternWorkspace",
             "SheetMetal_UnfoldUpdate",
             "SheetMetal_AddCornerRelief",
+            "SheetMetal_CornerTreatment",
             "SheetMetal_AddRelief",
             "SheetMetal_AddJunction",
             "SheetMetal_AddBend",

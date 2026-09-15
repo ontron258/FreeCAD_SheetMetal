@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>SMCornerTreatmentTaskPanel</class>
+ <widget class="QWidget" name="SMCornerTreatmentTaskPanel">
+  <property name="windowTitle"><string>Corner Round / Chamfer</string></property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item><widget class="QLabel" name="Instructions">
+    <property name="text"><string>Select corner vertices or the short edges through the sheet thickness. All selected corners share the same size.</string></property>
+    <property name="wordWrap"><bool>true</bool></property>
+   </widget></item>
+   <item><layout class="QHBoxLayout" name="selectionButtons">
+    <item><widget class="QPushButton" name="AddRemove">
+     <property name="text"><string>Select corners</string></property>
+     <property name="checkable"><bool>true</bool></property>
+    </widget></item>
+    <item><widget class="QPushButton" name="pushClearSel">
+     <property name="text"><string>Clear selection</string></property>
+    </widget></item>
+   </layout></item>
+   <item><widget class="QTreeWidget" name="tree">
+    <property name="headerHidden"><bool>true</bool></property>
+    <column><property name="text"><string>Object</string></property></column>
+    <column><property name="text"><string>Corner</string></property></column>
+   </widget></item>
+   <item><layout class="QFormLayout" name="parameters">
+    <item row="0" column="0"><widget class="QLabel" name="TreatmentLabel">
+     <property name="text"><string>Treatment</string></property>
+    </widget></item>
+    <item row="0" column="1"><widget class="QComboBox" name="Treatment">
+     <item><property name="text"><string>Round</string></property></item>
+     <item><property name="text"><string>Chamfer</string></property></item>
+    </widget></item>
+    <item row="1" column="0"><widget class="QLabel" name="RadiusLabel">
+     <property name="text"><string>Radius</string></property>
+    </widget></item>
+    <item row="1" column="1"><widget class="Gui::QuantitySpinBox" name="Radius">
+     <property name="unit" stdset="0"><string notr="true">mm</string></property>
+     <property name="minimum" stdset="0"><double>0.000001</double></property>
+    </widget></item>
+    <item row="2" column="0"><widget class="QLabel" name="ChamferLabel">
+     <property name="text"><string>Chamfer distance</string></property>
+    </widget></item>
+    <item row="2" column="1"><widget class="Gui::QuantitySpinBox" name="ChamferSize">
+     <property name="unit" stdset="0"><string notr="true">mm</string></property>
+     <property name="minimum" stdset="0"><double>0.000001</double></property>
+     <property name="toolTip"><string>Equal setback measured along both sides of each corner.</string></property>
+    </widget></item>
+   </layout></item>
+  </layout>
+ </widget>
+ <customwidgets><customwidget>
+  <class>Gui::QuantitySpinBox</class><extends>QDoubleSpinBox</extends><header>Gui/QuantitySpinBox.h</header>
+ </customwidget></customwidgets>
+ <resources/>
+ <connections/>
+</ui>

@@ -102,6 +102,7 @@ class SMMeshDefinition(_TransientProxy):
                   "{} kg/m^3".format(SheetMetalMaterial._DENSITIES_KG_M3["Hot Rolled Steel"]))
         _property(obj, "String", "Material", "Material", "Wire material description", "Steel wire")
         _property(obj, "String", "LastError", "Mesh", "Last carrier or parameter error", "", True)
+        obj.setEditorMode("Placement", 1)
 
     def onDocumentRestored(self, obj):
         self.loads(None)
@@ -175,6 +176,16 @@ class SMMeshDefinition(_TransientProxy):
             if list(obj.CarrierContainers) != containers:
                 obj.CarrierContainers = containers
             obj.Shape = mapping.boundary
+            # Keep the developed base panel at the formed base panel. The
+            # normalized XY grid remains local to the sketches and flat shapes.
+            placement = obj.Source[0].getGlobalPlacement()
+            parent = obj.getParentGeoFeatureGroup()
+            if parent is not None:
+                placement = parent.getGlobalPlacement().inverse() * placement
+            placement = (placement * App.Placement(mapping.alignment.inverse())
+                         * App.Placement(App.Vector(0, 0, -mapping.thickness / 2), App.Rotation()))
+            if obj.Placement != placement:
+                obj.Placement = placement
             obj.MeshThickness = thickness
             obj.LastError = ""
         except Exception as error:
@@ -197,19 +208,23 @@ class SMMeshPatternSketch(_TransientProxy):
         _property(obj, "String", "Family", "Mesh", "Wire family", family, True)
         _property(obj, "String", "SheetMetalType", "Mesh", "Mesh object type", "MeshPatternSketch", True)
         _property(obj, "String", "LastError", "Mesh", "Last pattern generation error", "", True)
+        obj.setEditorMode("Placement", 1)
         obj.Proxy = self
 
     def onChanged(self, obj, prop):
         if (prop == "Geometry" and not getattr(self, "_generating", False)
+                and "Recompute" not in obj.State
                 and not getattr(obj.Document, "Restoring", False)
                 and getattr(obj, "Definition", None) is not None):
             obj.Definition.PatternMode = "Editable"
 
     def execute(self, obj):
         from SheetMetalMeshGeometry import generate_lines
+        if obj.Definition is not None and obj.Placement != obj.Definition.Placement:
+            obj.Placement = obj.Definition.Placement
         if obj.Definition is not None and obj.Definition.PatternMode == "Editable":
             obj.LastError = ""
-            return
+            return False  # Also run native Sketcher recompute (constraints and saved frame).
         self._generating = True
         try:
             definition = obj.Definition
@@ -217,7 +232,8 @@ class SMMeshPatternSketch(_TransientProxy):
                 raise ValueError(translate("SheetMetal", "The mesh carrier is invalid."))
             family = obj.Family
             lines = generate_lines(
-                definition.Shape, family, str(getattr(definition, family + "Mode")),
+                definition.Proxy.surface_map(definition).boundary,
+                family, str(getattr(definition, family + "Mode")),
                 getattr(definition, family + "Pitch").Value,
                 getattr(definition, family + "Count"),
                 getattr(definition, family + "Margin").Value,
@@ -236,6 +252,9 @@ class SMMeshPatternSketch(_TransientProxy):
             App.Console.PrintError("Welded mesh pattern: {}\n".format(error))
         finally:
             self._generating = False
+        # Keep Sketcher's internal frame in sync with the feature Placement so
+        # native save/restore does not reset the sketch to the document origin.
+        return False
 
 
 class SMWeldedMesh(_TransientProxy):
@@ -267,7 +286,8 @@ class SMWeldedMesh(_TransientProxy):
             diameters = wire_diameters(definition)
             _thickness, centres = mesh_layers(*diameters, definition.WeldPenetration.Value,
                                               reverse=str(definition.LayerOrder) == "Longitude above")
-            families = [sketch_lines(getattr(obj, family + "Sketch")) for family in FAMILIES]
+            families = [sketch_lines(getattr(obj, family + "Sketch"), definition.Placement)
+                        for family in FAMILIES]
             if sum(map(len, families)) > MAX_WIRES:
                 raise ValueError(translate("SheetMetal", "The complete mesh exceeds 2000 wire pieces."))
             formed, flat = [], []
@@ -322,10 +342,13 @@ class SMMeshFlat(_TransientProxy):
     def __init__(self, obj, mesh):
         _property(obj, "String", "SheetMetalType", "Mesh", "Mesh object type", "WeldedMeshFlat", True)
         _property(obj, "Link", "Mesh", "Mesh", "Formed welded mesh", mesh, True)
+        obj.setEditorMode("Placement", 1)
         obj.Proxy = self
 
     def execute(self, obj):
         obj.Shape = obj.Mesh.FlatShape if obj.Mesh is not None else Part.Shape()
+        if obj.Mesh is not None and obj.Placement != obj.Mesh.Definition.Placement:
+            obj.Placement = obj.Mesh.Definition.Placement
 
 
 def create_welded_mesh(doc, source, face_name, **parameters):

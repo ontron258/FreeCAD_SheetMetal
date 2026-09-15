@@ -284,12 +284,16 @@ class SMMeshSheetFlat:
         obj.addProperty("Part::PropertyPartShape", "BendLines", "Mesh",
                         translate("App::Property", "Developed bend centre lines"))
         obj.setEditorMode("BendLines", 1)
+        obj.setEditorMode("Placement", 1)
         obj.Proxy = self
 
     def execute(self, obj):
         try:
             mapping = obj.Definition.Proxy.surface_map(obj.Definition)
-            obj.Shape = mapping.boundary.extrude(App.Vector(0, 0, -mapping.thickness))
+            top = mapping.boundary.translated(App.Vector(0, 0, mapping.thickness / 2))
+            obj.Shape = top.extrude(App.Vector(0, 0, -mapping.thickness))
+            if obj.Placement != obj.Definition.Placement:
+                obj.Placement = obj.Definition.Placement
             obj.BendLines = mapping.bend_lines
             obj.LastError = ""
         except Exception as error:

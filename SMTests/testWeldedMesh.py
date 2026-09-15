@@ -130,8 +130,54 @@ class TestWeldedMesh(unittest.TestCase):
             self.assertAlmostEqual(expected, part.Thickness.Value)
             self.assertAlmostEqual(expected, body.Shape.BoundBox.ZLength)
             self.assertAlmostEqual(expected, flat.Shape.BoundBox.ZLength)
+            self.assertAlmostEqual(body.Shape.BoundBox.ZMin, flat.Shape.BoundBox.ZMin)
+            self.assertAlmostEqual(body.Shape.BoundBox.ZMax, flat.Shape.BoundBox.ZMax)
+            flat_wires = self.doc.getObject(part.FlatPattern)
+            self.assertAlmostEqual(flat.Shape.BoundBox.ZMin, flat_wires.Shape.BoundBox.ZMin)
+            self.assertAlmostEqual(flat.Shape.BoundBox.ZMax, flat_wires.Shape.BoundBox.ZMax)
             self.assertAlmostEqual(body.Shape.BoundBox.ZMin, mesh.Shape.BoundBox.ZMin)
             self.assertAlmostEqual(body.Shape.BoundBox.ZMax, mesh.Shape.BoundBox.ZMax)
+
+    def test_developed_base_panel_stays_on_the_formed_reference_face(self):
+        first, _second = _two_bend_part(self.doc)
+        part, mesh = create_welded_mesh(self.doc, first, self.top_face(first.Shape))
+        mapping = mesh.Definition.Proxy.surface_map(mesh.Definition)
+        flat = self.doc.getObject(part.FlatSheetMetal)
+        # The selected face must lie on the flat sheet's corresponding surface,
+        # even when the unfolded flange extends to negative coordinates.
+        self.assertAlmostEqual(mapping.root_face.Area,
+                               flat.Shape.common(mapping.root_face).Area, places=5)
+        self.assertLess(flat.Shape.BoundBox.YMin, mapping.root_face.BoundBox.YMin)
+
+    def test_all_views_and_manual_sketches_follow_a_placed_body(self):
+        _source, part, mesh = self.mesh()
+        body = self.doc.getObject(part.SheetMetalBody)
+        longitude, latitude = convert_to_editable(mesh)
+        longitude.delGeometry(0)
+        self.doc.recompute()
+        before = list(longitude.Geometry)
+        length = mesh.FlatWireLength.Value
+        body.Placement = App.Placement(App.Vector(90, -20, 15),
+                                       App.Rotation(App.Vector(1, 2, 3), 47))
+        part.Placement = App.Placement(App.Vector(-30, 70, 25),
+                                       App.Rotation(App.Vector(0, 1, 0), 30))
+        self.doc.recompute()
+        self.assert_valid_mesh(mesh)
+        self.assertEqual("Editable", mesh.Definition.PatternMode)
+        self.assertAlmostEqual(length, mesh.FlatWireLength.Value)
+        self.assertEqual(len(before), longitude.GeometryCount)
+        for old, current in zip(before, longitude.Geometry):
+            self.assertLess(old.StartPoint.distanceToPoint(current.StartPoint), 1e-7)
+            self.assertLess(old.EndPoint.distanceToPoint(current.EndPoint), 1e-7)
+        flat = self.doc.getObject(part.FlatSheetMetal)
+        flat_wires = self.doc.getObject(part.FlatPattern)
+        for obj in (flat, flat_wires, longitude, latitude):
+            self.assertTrue(obj.getGlobalPlacement().isSame(mesh.Definition.getGlobalPlacement(), 1e-7))
+        # A planar part is unchanged by unfolding, including its world location.
+        self.assertLess(body.Shape.CenterOfMass.distanceToPoint(flat.Shape.CenterOfMass), 1e-6)
+        for coordinate in ("XMin", "XMax", "YMin", "YMax", "ZMin", "ZMax"):
+            self.assertAlmostEqual(getattr(mesh.Shape.BoundBox, coordinate),
+                                   getattr(flat_wires.Shape.BoundBox, coordinate), places=5)
 
     def test_editing_the_generated_sketch_switches_to_manual_in_place(self):
         _source, _part, mesh = self.mesh()
@@ -368,6 +414,8 @@ class TestWeldedMesh(unittest.TestCase):
             self.assertIsInstance(mesh.Proxy, SMWeldedMesh)
             self.assertIsInstance(mesh.Definition.Proxy, SMMeshDefinition)
             self.assertIsInstance(mesh.LatitudeSketch.Proxy, SMMeshPatternSketch)
+            for sketch in (mesh.LongitudeSketch, mesh.LatitudeSketch):
+                self.assertTrue(sketch.Placement.isSame(mesh.Definition.Placement, 1e-7))
             mesh.Definition.touch()
             self.doc.recompute()
             self.assert_valid_mesh(mesh)
@@ -391,6 +439,10 @@ class TestWeldedMesh(unittest.TestCase):
 
     def test_flat_workspace_packs_wires_in_xy_for_solids_and_centrelines(self):
         _source, part, mesh = self.mesh()
+        body = self.doc.getObject(part.SheetMetalBody)
+        body.Placement = App.Placement(App.Vector(90, -20, 15),
+                                       App.Rotation(App.Vector(1, 2, 3), 47))
+        self.doc.recompute()
         flat = self.doc.getObject(part.FlatPattern)
         link = self.doc.addObject("App::Link", "FlatPresentation")
         link.LinkedObject = flat

@@ -7,6 +7,12 @@ product: one **Sheet Metal Body**, **Flat Sheet Metal**, **Formed Wires**,
 The Body is the primary modelling representation; its current Tip drives the
 derived representations. Use the part's **Representation** property to switch views.
 
+The developed base panel stays aligned with the selected formed base panel.
+Flat sheet metal, flat wires and their sketches share that panel's midplane;
+switching representations does not relocate the part. Sketch geometry uses a
+local XY grid, while its placement follows the Body. Only the Flat Pattern
+Workspace arranges separate presentation links for inspection and packing.
+
 The Body represents the nominal full wire envelope. Its thickness is driven by
 wire diameters and weld penetration, rather than by a sheet gauge. An existing
 Body retains its features. A carrier built with Part features keeps its editable
@@ -52,8 +58,8 @@ The same values are also available in the property editor.
   wires with 0.3 mm penetration produce a 3.7 mm Body and flat sheet envelope.
 - **LayerOrder** chooses which family lies toward the selected face normal.
   The envelope is centred at the carrier's mid-thickness by default;
-  **ReferenceOffset** moves it along that normal. The flat output is centred
-  about its own XY plane independently of this carrier offset.
+  **ReferenceOffset** moves the formed wires along that normal. The flat output
+  remains centred on the base panel's midplane independently of this offset.
 - **KFactor** is the ANSI development value, inherited initially from the
   owning Sheet Metal Part. Development uses the full envelope thickness.
 - **Centrelines** provides a lighter preview. Choose **Solid wires** for solid

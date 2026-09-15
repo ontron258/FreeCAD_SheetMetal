@@ -220,19 +220,22 @@ def generate_lines(boundary, family, mode, pitch, count, margin, offset):
     return result
 
 
-def sketch_lines(sketch):
+def sketch_lines(sketch, reference_placement=None):
     if sketch is None:
         raise ValueError(translate("SheetMetal", "A wire sketch is missing."))
     if getattr(sketch, "LastError", ""):
         raise ValueError(sketch.LastError)
+    placement = sketch.Placement
+    if reference_placement is not None:
+        placement = reference_placement.inverse() * placement
     lines = []
     for index, geometry in enumerate(sketch.Geometry):
         if sketch.getConstruction(index):
             continue
         if not isinstance(geometry, Part.LineSegment):
             raise ValueError(translate("SheetMetal", "Wire sketches currently support straight line segments only."))
-        start = sketch.Placement.multVec(geometry.StartPoint)
-        end = sketch.Placement.multVec(geometry.EndPoint)
+        start = placement.multVec(geometry.StartPoint)
+        end = placement.multVec(geometry.EndPoint)
         if abs(start.z) > TOLERANCE or abs(end.z) > TOLERANCE:
             raise ValueError(translate("SheetMetal", "Wire sketches must remain in the flat XY plane."))
         if start.distanceToPoint(end) <= TOLERANCE:

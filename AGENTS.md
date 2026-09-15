@@ -12,10 +12,13 @@ For the current Windows development environment:
 - Repository: `C:\FreeCAD\FreeCAD_SheetMetal`
 - FreeCAD installation: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311`
 - Installed addon junction: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\Mod\SheetMetal`
+- Active user addon (takes precedence): `C:\Users\adria\AppData\Roaming\FreeCAD\v1-1\Mod\sheetmetal`
 - Example test document: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\data\examples\Sheetmetal test.FCStd`
 
 Treat the installed addon as a deployment target. Never commit files from the
 installed addon directory.
+The user addon is a separate copy; deploy changed files there and verify imported
+paths. Updating the installation junction alone does not update this active copy.
 
 ## Usage documentation and repository boundary
 
@@ -157,6 +160,9 @@ weight. Keep envelope parameter synchronization free of dependency cycles.
 `SheetMetalMeshPart.py` manages ownership and imported-carrier envelopes. New
 products use one longitude/latitude sketch pair; generated and editable are modes
 of those same sketches. Regeneration replaces their geometry in an undo transaction.
+Keep both flat representations and the sketches in one shared frame at the formed
+reference panel's midplane. Their normalized XY geometry is local to that frame;
+only workspace links are moved for packing.
 Welded mesh is an unused-in-production prototype. Do not add compatibility or
 migration paths for earlier mesh schemas; update the examples to the current model.
 

@@ -30,6 +30,7 @@ from SMTests.testBoltConnection import TestBoltConnection
 from SMTests.testBendData import TestBendData
 from SMTests.testConnectedPattern import TestConnectedPattern
 from SMTests.testCornerTreatment import TestCornerTreatment
+from SMTests.testCornerTreatmentGui import TestCornerTreatmentGui
 from SMTests.testMirroredPart import TestMirroredPart
 from SMTests.testProxyRecovery import TestProxyRecovery
 from SMTests.testShapedFlange import TestShapedFlange

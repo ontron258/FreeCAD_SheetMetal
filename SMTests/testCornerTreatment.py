@@ -9,7 +9,8 @@ import FreeCAD as App
 import Part
 
 from SheetMetalCornerTreatmentCmd import (
-    SMCornerTreatment, adoptCornerFeature, cornerEdges, makeCornerTreatment,
+    SMCornerTreatment, CornerSelectionGate, adoptCornerFeature, cornerEdges,
+    cornerLengthUnit, makeCornerTreatment,
 )
 
 
@@ -158,7 +159,9 @@ class TestCornerTreatment(unittest.TestCase):
                 SMCornerTreatment(feature, base, self.edges)
                 feature.Radius = 6
                 adoptCornerFeature(feature, base)
+                adoptCornerFeature(feature, base)
                 doc.recompute()
+                self.assertEqual(container.Group.count(feature), 1)
                 self.assertIs(feature.getParentGeoFeatureGroup(), container)
                 self.assertEqual(part.Tip, feature.Name)
                 self.assertAlmostEqual(_shape_from_part_tip(part).Volume, feature.Shape.Volume)
@@ -167,6 +170,89 @@ class TestCornerTreatment(unittest.TestCase):
                     self.assertSolid(container.Shape)
             finally:
                 App.closeDocument(doc.Name)
+
+    def test_saved_duplicate_body_reference_is_repaired(self):
+        doc = App.newDocument("DuplicatedCornerMembership")
+        try:
+            body = doc.addObject("PartDesign::Body", "Body")
+            base = body.newObject("PartDesign::Feature", "Base")
+            base.Shape = self.sheet
+            feature = doc.addObject("PartDesign::FeaturePython", "Corners")
+            SMCornerTreatment(feature, base, self.edges)
+            adoptCornerFeature(feature, base)
+            body.addObject(feature)  # The original GUI command's second insertion.
+            doc.recompute()
+            self.assertEqual(body.Group.count(feature), 2)
+            volume = feature.Shape.Volume
+            with tempfile.TemporaryDirectory() as directory:
+                filename = os.path.join(directory, "Duplicate.FCStd")
+                doc.saveAs(filename)
+                App.closeDocument(doc.Name)
+                doc = App.openDocument(filename)
+                doc.recompute()
+                self.assertEqual([o.Name for o in doc.Body.Group], ["Base", "Corners"])
+                self.assertEqual(doc.Body.Tip, doc.Corners)
+                self.assertAlmostEqual(doc.Corners.Shape.Volume, volume)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_error_clears_stale_shape_and_recovers(self):
+        doc = App.newDocument("CornerError")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = self.sheet
+            feature = doc.addObject("Part::FeaturePython", "Corners")
+            SMCornerTreatment(feature, base, self.edges)
+            feature.Proxy.execute(feature)
+            feature.Radius = 1000
+            with self.assertRaises(ValueError):
+                feature.Proxy.execute(feature)
+            self.assertTrue(feature.Shape.isNull())
+            self.assertIn("Reduce the size", feature.LastError)
+            feature.Radius = 3
+            feature.baseObject = (base, ["Face1"])
+            with self.assertRaises(ValueError):
+                feature.Proxy.execute(feature)
+            self.assertIn("Face1", feature.LastError)
+            feature.baseObject = (base, self.edges)
+            feature.Proxy.execute(feature)
+            self.assertFalse(feature.LastError)
+            self.assertSolid(feature.Shape)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_gate_rejects_non_corners_and_other_objects(self):
+        doc = App.newDocument("CornerGate")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = self.sheet
+            other = doc.addObject("Part::Feature", "Other")
+            other.Shape = self.sheet
+            gate = CornerSelectionGate(base)
+            self.assertTrue(gate.allow(doc, base, self.edges[0]))
+            self.assertTrue(gate.allow(doc, base, "Vertex1"))
+            long_edge = next("Edge%d" % (i + 1) for i, edge in enumerate(self.sheet.Edges)
+                             if edge.Length > 2)
+            for name in ("", "Face1", long_edge, "Edge999"):
+                self.assertFalse(gate.allow(doc, base, name), name)
+            self.assertFalse(gate.allow(doc, other, self.edges[0]))
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_length_units_follow_document_not_global_schema(self):
+        schema = App.Units.getSchema()
+        doc = App.newDocument("CornerUnits")
+        try:
+            doc.UnitSystem = 0
+            App.Units.setSchema(3)
+            self.assertEqual(cornerLengthUnit(doc), "mm")
+            for unit_schema in (2, 3, 5, 7):
+                doc.UnitSystem = unit_schema
+                App.Units.setSchema(0)
+                self.assertEqual(cornerLengthUnit(doc), "in")
+        finally:
+            App.closeDocument(doc.Name)
+            App.Units.setSchema(schema)
 
     def test_bent_sheet_corners_on_different_planes_and_unfold(self):
         from SMTests.testShapedFlange import _panel

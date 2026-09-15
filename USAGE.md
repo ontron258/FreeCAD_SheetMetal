@@ -111,6 +111,22 @@ and supports corners on different planar flanges of one solid. Bend edges,
 already rounded corners, and selections from multiple objects are rejected.
 Reduce the size if neighboring corners or bends leave insufficient room.
 
+While selecting, the tool filters picks to valid corners on the source sheet.
+An invalid or oversized preview shows a red error message in the task panel;
+invalid selection rows are highlighted. The source sheet stays visible until
+the preview succeeds, and OK cannot accept a failed feature. The feature's
+read-only **LastError** property also records the reason for a failed recompute.
+
+Dimension fields follow the document's unit system: mm in standard metric
+documents and inches in imperial documents. Bare numbers use the displayed
+unit. Changing the unit system updates the display without changing the
+physical radius or chamfer distance already stored in the feature.
+
+Files created by the initial version may list the same corner feature twice
+inside a Body. Reopening them with this version removes the repeated reference
+in memory while preserving the feature and its geometry; save normally to keep
+that repair in the document.
+
 Double-click the feature to change its selection, treatment, or dimensions.
 Apply this finishing feature after cumulative Face operations, and unfold the
 finished result. Restart FreeCAD after installing the new command module.

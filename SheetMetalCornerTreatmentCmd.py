@@ -106,6 +106,37 @@ def cornerEdges(shape, names):
     return result
 
 
+class CornerSelectionGate:
+    """Filter picks against an immutable snapshot of the source sheet."""
+
+    def __init__(self, base):
+        self.base = base
+        self.shape = base.Shape.copy()
+        self.allowed = {}
+
+    def allow(self, doc, obj, sub):
+        if obj != self.base or doc != self.base.Document or not sub:
+            return False
+        if sub not in self.allowed:
+            try:
+                cornerEdges(self.shape, [sub])
+                self.allowed[sub] = True
+            except Exception:
+                self.allowed[sub] = False
+        return self.allowed[sub]
+
+
+def cornerLengthUnit(doc):
+    """Use the owning document's units, including inches for small US lengths."""
+    schema = FreeCAD.Units.getSchema()
+    if hasattr(doc, "UnitSystem"):
+        schema = doc.getEnumerationsOfProperty("UnitSystem").index(doc.UnitSystem)
+    # US customary otherwise normalizes a small corner radius to thou.
+    if FreeCAD.Units.listSchemas()[schema].startswith("Imperial"):
+        return "in"
+    return FreeCAD.Units.schemaTranslate(FreeCAD.Units.Quantity("1 mm"), schema)[2]
+
+
 def makeCornerTreatment(shape, names, treatment="Round", size=1.0):
     """Apply one radius or equal-distance chamfer to all selected corners.
 
@@ -141,11 +172,24 @@ def _owning_part(obj):
 def adoptCornerFeature(obj, base):
     """Keep the finishing feature in the source's Body/Part and advance its Tip."""
     parent = base.getParentGeoFeatureGroup()
-    if parent is not None:
+    if parent is not None and obj not in parent.Group:
         parent.addObject(obj)
+    repairCornerMembership(obj)
     part = _owning_part(obj)
     if part is not None and "Tip" in part.PropertiesList:
         part.Tip = obj.Name
+
+
+def repairCornerMembership(obj):
+    """Repair the original command's repeated Body reference without deleting a feature."""
+    parent = obj.getParentGeoFeatureGroup()
+    if parent is None or not hasattr(parent, "Group") or parent.Group.count(obj) < 2:
+        return
+    members = []
+    for member in parent.Group:
+        if member != obj or obj not in members:
+            members.append(member)
+    parent.Group = members
 
 
 class SMCornerTreatment:
@@ -163,6 +207,9 @@ class SMCornerTreatment:
             translate("App::Property", "Outline corner radius"), 1.0)
         SheetMetalTools.smAddLengthProperty(obj, "ChamferSize",
             translate("App::Property", "Equal setback along both sides of the corner"), 1.0)
+        SheetMetalTools.smAddStringProperty(obj, "LastError",
+            translate("App::Property", "Reason the corner feature could not be built"), "", "Status")
+        obj.setEditorMode("LastError", 1)
 
     def onChanged(self, obj, prop):
         if prop == "Treatment":
@@ -173,6 +220,7 @@ class SMCornerTreatment:
     def onDocumentRestored(self, obj):
         self.addVerifyProperties(obj)
         self.onChanged(obj, "Treatment")
+        repairCornerMembership(obj)
 
     def getElementMapVersion(self, _fp, ver, _prop, restored):
         return None if restored else smElementMapVersion + ver
@@ -180,14 +228,24 @@ class SMCornerTreatment:
     def execute(self, obj):
         self.addVerifyProperties(obj)
         self.onChanged(obj, "Treatment")
-        base, names = obj.baseObject
-        if base is None:
-            raise ValueError(translate("SheetMetal", "Select a base sheet-metal feature."))
-        size = obj.Radius.Value if obj.Treatment == "Round" else obj.ChamferSize.Value
-        obj.Shape = makeCornerTreatment(base.Shape, names, str(obj.Treatment), size)
+        try:
+            base, names = obj.baseObject
+            if base is None:
+                raise ValueError(translate("SheetMetal", "Select a base sheet-metal feature."))
+            size = obj.Radius.Value if obj.Treatment == "Round" else obj.ChamferSize.Value
+            result = makeCornerTreatment(base.Shape, names, str(obj.Treatment), size)
+        except Exception as error:
+            obj.LastError = str(error)
+            # Do not present the last successful shape as the requested result.
+            obj.Shape = Part.Shape()
+            raise
+        obj.Shape = result
+        obj.LastError = ""
 
 
 if SheetMetalTools.isGuiLoaded():
+    from PySide import QtCore, QtGui
+
     Gui = FreeCAD.Gui
     _ICON = os.path.join(SheetMetalTools.icons_path, "SheetMetal_CornerTreatment.svg")
 
@@ -209,6 +267,11 @@ if SheetMetalTools.isGuiLoaded():
     class SMCornerTreatmentTaskPanel:
         def __init__(self, obj):
             self.obj = obj
+            self._gateActive = False
+            self._documentObserverActive = False
+            self._closed = False
+            self.selectionError = ""
+            self.invalidNames = []
             obj.Proxy.addVerifyProperties(obj)
             self.form = SheetMetalTools.taskLoadUI("CornerTreatmentPanel.ui")
             self.selParams = SheetMetalTools.taskConnectSelection(
@@ -216,19 +279,131 @@ if SheetMetalTools.isGuiLoaded():
                 self.form.pushClearSel)
             self.selParams.ConstrainToObject = obj.baseObject[0]
             self.selParams.verifySelection = self.verifySelection
+            self.form.AddRemove.clicked.connect(self.selectionModeChanged)
+            self.form.destroyed.connect(self.cleanup)
+            self.form.ErrorMessage.setTextFormat(QtCore.Qt.PlainText)
+            self.form.ErrorMessage.setStyleSheet(
+                "QLabel { color: #9f1239; background: #fff1f2; "
+                "border: 1px solid #fda4af; padding: 8px; }")
             SheetMetalTools.taskConnectEnum(obj, self.form.Treatment, "Treatment",
-                                           self.updateMode)
-            SheetMetalTools.taskConnectSpin(obj, self.form.Radius, "Radius")
-            SheetMetalTools.taskConnectSpin(obj, self.form.ChamferSize, "ChamferSize")
+                                           self.parameterChanged)
+            for name in ("Radius", "ChamferSize"):
+                spin = getattr(self.form, name)
+                spin.setProperty("autoNormalize", False)
+                spin.setProperty("unit", cornerLengthUnit(obj.Document))
+                SheetMetalTools.taskConnectSpin(obj, spin, name, self.parameterChanged)
+            FreeCAD.addDocumentObserver(self)
+            self._documentObserverActive = True
             self.updateMode()
+            self.updateFeedback()
+
+        def slotChangedDocument(self, doc, prop):
+            if not self._closed and doc == self.obj.Document and prop == "UnitSystem":
+                # FreeCAD also updates its quantity widgets while processing
+                # the schema change. Apply the document unit after that update.
+                QtCore.QTimer.singleShot(0, self.updateUnits)
+
+        def updateUnits(self):
+            if self._closed:
+                return
+            for name in ("Radius", "ChamferSize"):
+                spin = getattr(self.form, name)
+                blocked = spin.blockSignals(True)
+                try:
+                    spin.setProperty("unit", cornerLengthUnit(self.obj.Document))
+                    spin.setProperty("value", getattr(self.obj, name))
+                finally:
+                    spin.blockSignals(blocked)
+
+        def cleanup(self, *_args):
+            self._closed = True
+            self.cleanupSelection()
+            if self._documentObserverActive:
+                FreeCAD.removeDocumentObserver(self)
+                self._documentObserverActive = False
+
+        def cleanupSelection(self, *_args):
+            if self._gateActive:
+                Gui.Selection.removeSelectionGate()
+                self._gateActive = False
+            observer = getattr(SheetMetalTools.SelectionObserver, "observer", None)
+            if observer is not None and observer.sp is self.selParams:
+                SheetMetalTools.SelectionObserver._delete_observer()
+
+        def selectionModeChanged(self, *_args):
+            if not self.selParams.SelectState and not self._gateActive:
+                self.gate = CornerSelectionGate(self.obj.baseObject[0])
+                Gui.Selection.addSelectionGate(self.gate)
+                self._gateActive = True
+            elif self.selParams.SelectState:
+                self.cleanupSelection()
+            self.updateFeedback()
+
+        def parameterChanged(self, _value=None):
+            self.updateMode()
+            self.updateFeedback()
+
+        def updateFeedback(self):
+            if self._closed:
+                return
+            error = self.selectionError or self.obj.LastError
+            base, names = self.obj.baseObject
+            if self.selParams.SelectState and base is not None:
+                SheetMetalTools.taskPopulateSelectionList(self.form.tree, (base, names))
+                self.invalidNames = []
+                if error:
+                    for name in names:
+                        try:
+                            cornerEdges(base.Shape, [name])
+                        except Exception:
+                            self.invalidNames.append(name)
+            self.form.ErrorMessage.setText(
+                translate("SheetMetal", "Corner preview failed: ") + error if error else "")
+            self.form.ErrorMessage.setVisible(bool(error))
+            for i in range(self.form.tree.topLevelItemCount()):
+                item = self.form.tree.topLevelItem(i)
+                invalid = item.text(1) in self.invalidNames
+                for column in (0, 1):
+                    item.setBackground(column, QtGui.QBrush(QtGui.QColor("#fff1f2"))
+                                       if invalid else QtGui.QBrush())
+                    item.setForeground(column, QtGui.QBrush(QtGui.QColor("#9f1239"))
+                                       if invalid else QtGui.QBrush())
+                    item.setToolTip(column, self.selectionError if invalid else "")
+            if self.selParams.SelectState:
+                self.obj.Visibility = not bool(error)
+                if base is not None:
+                    base.Visibility = bool(error)
 
         def verifySelection(self):
-            if len(Gui.Selection.getSelectionEx()) > 1:
-                SheetMetalTools.smWarnDialog(translate(
-                    "SheetMetal", "Select corners from one sheet-metal feature."
-                ))
-                return None, None
-            return SheetMetalTools.SMSelectionParameters.verifySelection(self.selParams)
+            self.selectionError = ""
+            self.invalidNames = []
+            selection = Gui.Selection.getSelectionEx()
+            base = self.obj.baseObject[0]
+            if len(selection) != 1 or selection[0].Object != base:
+                self.selectionError = translate(
+                    "SheetMetal", "Select at least one corner from the source sheet-metal feature.")
+            else:
+                names = list(selection[0].SubElementNames)
+                for name in names:
+                    try:
+                        cornerEdges(base.Shape, [name])
+                    except Exception:
+                        self.invalidNames.append(name)
+                if self.invalidNames:
+                    # The shared live observer can display Body-qualified names.
+                    # Rebuild from resolved source names so the offending rows
+                    # match the error and can be removed with Clear Selected.
+                    SheetMetalTools.taskPopulateSelectionList(
+                        self.form.tree, (base, names), True)
+                    self.selectionError = translate(
+                        "SheetMetal", "Invalid corners: %1. Select sharp outline vertices or thickness edges."
+                    ).replace("%1", ", ".join(self.invalidNames))
+                elif not names:
+                    self.selectionError = translate("SheetMetal", "Select at least one corner.")
+                else:
+                    return base, names
+            self.updateFeedback()
+            return None, None
 
         def updateMode(self, _value=None):
             rounded = self.obj.Treatment == "Round"
@@ -246,16 +421,19 @@ if SheetMetalTools.isGuiLoaded():
         def accept(self):
             if not self.selParams.SelectState:
                 SheetMetalTools._taskMultiSelectionModeClicked(self.selParams)
+                self.selectionModeChanged()
                 if not self.selParams.SelectState:
                     return False
             try:
                 self.obj.Proxy.execute(self.obj)
-            except Exception as error:
-                SheetMetalTools.smWarnDialog(str(error))
+            except Exception:
+                self.updateFeedback()
                 return False
+            self.cleanup()
             return SheetMetalTools.taskAccept(self)
 
         def reject(self):
+            self.cleanup()
             SheetMetalTools.taskReject(self)
 
     class AddCornerTreatmentCommand:
@@ -269,11 +447,16 @@ if SheetMetalTools.isGuiLoaded():
             }
 
         def IsActive(self):
+            if not FreeCAD.ActiveDocument or Gui.Control.activeDialog():
+                return False
             selection = Gui.Selection.getSelectionEx()
-            return bool(FreeCAD.ActiveDocument and len(selection) == 1
-                        and selection[0].SubElementNames
-                        and all(isinstance(item, (Part.Vertex, Part.Edge))
-                                for item in selection[0].SubObjects))
+            if len(selection) != 1 or not selection[0].SubElementNames:
+                return False
+            try:
+                cornerEdges(selection[0].Object.Shape, selection[0].SubElementNames)
+                return True
+            except Exception:
+                return False
 
         def Activated(self):
             if not self.IsActive():
@@ -293,7 +476,9 @@ if SheetMetalTools.isGuiLoaded():
                 obj.Label = translate("SheetMetal", "Corner Round / Chamfer")
                 adoptCornerFeature(obj, base)
                 SMCornerTreatmentViewProvider(obj.ViewObject)
-                SheetMetalTools.smAddNewObject(base, obj, body, SMCornerTreatmentTaskPanel)
+                # adoptCornerFeature already added it to its Body/Part. Calling
+                # Body.addObject a second time creates a repeated tree entry.
+                SheetMetalTools.smAddNewObject(base, obj, None, SMCornerTreatmentTaskPanel)
             except Exception:
                 base.Document.abortTransaction()
                 raise

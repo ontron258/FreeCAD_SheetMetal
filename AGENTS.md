@@ -12,13 +12,13 @@ For the current Windows development environment:
 - Repository: `C:\FreeCAD\FreeCAD_SheetMetal`
 - FreeCAD installation: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311`
 - Installed addon junction: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\Mod\SheetMetal`
-- Active user addon (takes precedence): `C:\Users\adria\AppData\Roaming\FreeCAD\v1-1\Mod\sheetmetal`
 - Example test document: `C:\FreeCAD\FreeCAD_1.1.3-Windows-x86_64-py311\data\examples\Sheetmetal test.FCStd`
 
 Treat the installed addon as a deployment target. Never commit files from the
 installed addon directory.
-The user addon is a separate copy; deploy changed files there and verify imported
-paths. Updating the installation junction alone does not update this active copy.
+FreeCAD loads the repository directly through this junction. The former standalone
+user addon was moved into `C:\FreeCAD\backups\sheetmetal-installed-copy-before-main-*`.
+Do not recreate a competing user addon copy; verify imported paths in a fresh process.
 
 ## Usage documentation and repository boundary
 
@@ -232,6 +232,8 @@ already imported workbench will continue using the old module objects.
 Deploy only files changed by the current work. Preserve unrelated files in the
 installed addon and do not mirror-delete the directory. After copying, compare
 SHA-256 hashes between repository and installed copies, then restart FreeCAD.
+For the current junction-based installation, no copying is needed: repository
+changes are already deployed. Verify the junction target and fresh module imports.
 
 The repository must remain cleanly reproducible without relying on uncommitted
 changes in the installed addon.

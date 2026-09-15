@@ -73,10 +73,12 @@ Restart FreeCAD and select **Sheet Metal**. A junction uses the checkout's code
 directly, but an already running FreeCAD process retains imported Python modules.
 Do not edit an installed copy instead of the source repository.
 
-On this development machine, a separate user addon at
-`C:\Users\adria\AppData\Roaming\FreeCAD\v1-1\Mod\sheetmetal` currently takes
-precedence over the installation junction. Deploy changed repository files to
-that active copy and restart FreeCAD when testing through the normal GUI.
+On this development machine, FreeCAD loads the `main` checkout at
+`C:\FreeCAD\FreeCAD_SheetMetal` through the installation junction. The former
+standalone user addon is preserved under
+`C:\FreeCAD\backups\sheetmetal-installed-copy-before-main-*` and no longer
+overrides that checkout. Repository updates are available on the next FreeCAD
+restart without copying addon files.
 
 ## Basic modeling workflow
 

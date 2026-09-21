@@ -47,6 +47,155 @@ def _multi_loop_sketch(label, loops):
 
 
 class TestShapedFlange(unittest.TestCase):
+    @staticmethod
+    def positioned_panels(angle=90, height=30):
+        base = _panel("Base", [App.Vector(0, 0, 0), App.Vector(20, 0, 0),
+                              App.Vector(20, 20, 0), App.Vector(0, 20, 0)])
+        rotation = App.Rotation(App.Vector(1, 0, 0), angle)
+        wall = _panel("Wall", [rotation.multVec(p) for p in
+                              (App.Vector(0, 0, 0), App.Vector(20, 0, 0),
+                               App.Vector(20, height, 0), App.Vector(0, height, 0))],
+                      App.Placement(App.Vector(), rotation))
+        return base, wall
+
+    def test_wall_positions_match_make_wall_solids(self):
+        from SheetMetalCmd import smBend
+        for radius, thickness in ((3, 2), (1.5, 0.8)):
+            base, wall = self.positioned_panels(height=10 + radius + thickness)
+            carrier = Part.makeBox(20, 20, thickness)
+            edge = next("Edge" + str(i) for i, e in enumerate(carrier.Edges, 1)
+                        if all(abs(v.Point.y) < 1e-7 and abs(v.Point.z - thickness) < 1e-7
+                               for v in e.Vertexes))
+            for mode, offset in (("Material Outside", 0), ("Material Inside", 0),
+                                 ("Thickness Outside", 0), ("Offset", 3), ("Offset", -3)):
+                with self.subTest(radius=radius, thickness=thickness, mode=mode, offset=offset):
+                    shape = makeShapedFlangeStages(
+                        [{"sketches": [base], "radius": radius, "thickness_side": "Normal"},
+                         {"sketches": [wall], "radius": radius, "wall_position": mode, "offset": offset}],
+                        thickness=thickness,
+                    )
+                    expected, _ = smBend(thk=thickness, bendR=radius, bendA=90, extLen=10,
+                                         selFaceNames=[edge], MainObject=carrier,
+                                         BendType=mode, offset=offset)
+                    self.assertTrue(shape.isValid())
+                    self.assertEqual(1, len(shape.Solids))
+                    self.assertLess(shape.cut(expected).Volume, 1e-6)
+                    self.assertLess(expected.cut(shape).Volume, 1e-6)
+
+    def test_positioned_oblique_bends_unfold_with_constant_thickness(self):
+        from SheetMetalNewUnfolder import BendAllowanceCalculator, unfold
+        for angle in (55, 125):
+            base, wall = self.positioned_panels(angle)
+            for mode in ("Material Outside", "Material Inside", "Thickness Outside", "Offset"):
+                with self.subTest(angle=angle, mode=mode):
+                    shape = makeShapedFlangeStages(
+                        [{"sketches": [base], "radius": 3, "thickness_side": "Normal"},
+                         {"sketches": [wall], "radius": 3, "wall_position": mode, "offset": 2}],
+                        thickness=2,
+                    )
+                    self.assertTrue(shape.isValid())
+                    self.assertEqual(1, len(shape.Solids))
+                    radii = sorted(round(f.Surface.Radius, 6) for f in shape.Faces
+                                   if isinstance(f.Surface, Part.Cylinder))
+                    self.assertEqual([3, 5], radii)
+                    root = max((i for i, f in enumerate(shape.Faces)
+                                if isinstance(f.Surface, Part.Plane) and f.normalAt(0, 0).z > 0.999),
+                               key=lambda i: shape.Faces[i].Area)
+                    edges, bends = unfold(shape, root, BendAllowanceCalculator.from_single_value(0.5, "ansi"))
+                    self.assertEqual(1, len(bends))
+                    self.assertTrue(edges)
+
+    def test_later_sketch_plane_wall_follows_its_positioned_parent(self):
+        base, wall = self.positioned_panels(height=20)
+        top = _panel("Return", [App.Vector(0, 0, 20), App.Vector(20, 0, 20),
+                                App.Vector(20, 12, 20), App.Vector(0, 12, 20)])
+        stages = [{"sketches": [base], "radius": 3, "thickness_side": "Normal"},
+                  {"sketches": [wall], "radius": 3}, {"sketches": [top], "radius": 3}]
+        original = makeShapedFlangeStages(stages, thickness=2)
+        stages[1]["wall_position"] = "Material Outside"
+        positioned = makeShapedFlangeStages(stages, thickness=2)
+        self.assertTrue(positioned.isValid())
+        self.assertEqual(1, len(positioned.Solids))
+        self.assertTrue(original.isInside(App.Vector(10, 11, 20), 1e-7, True))
+        self.assertFalse(positioned.isInside(App.Vector(10, 11, 20), 1e-7, True))
+        self.assertTrue(positioned.isInside(App.Vector(10, 7, 20), 1e-7, True))
+
+    def test_outward_offset_retains_shaped_bend_ends_and_reliefs(self):
+        base, _wall = self.positioned_panels()
+        wall = _panel("Tapered", [App.Vector(0, 0, 0), App.Vector(20, 0, 0),
+                                  App.Vector(17, 0, 12), App.Vector(3, 0, 12)],
+                      App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 90)))
+        for relief in ("None", "Rectangle", "Round", "Tear"):
+            with self.subTest(relief=relief):
+                result = makeShapedFlangeStages(
+                    [{"sketches": [base], "radius": 2, "thickness_side": "Normal"},
+                     {"sketches": [wall], "radius": 2, "wall_position": "Offset", "offset": 2,
+                      "relief_type": relief, "relief_width": 1, "relief_depth": 1}], thickness=1,
+                )
+                self.assertTrue(result.isValid())
+                self.assertEqual(1, len(result.Solids))
+
+    def test_wall_position_properties_recompute_and_survive_reopening(self):
+        doc = App.newDocument("FaceWallPosition")
+        try:
+            part = createSheetMetalPart(doc)
+            part.UseMaterialCatalog = False
+            part.Thickness = 2
+            part.DefaultBendRadius = 3
+            profiles = []
+            for index, stub in enumerate(self.positioned_panels()):
+                profile = doc.addObject("Part::Feature", stub.Name + "Profile")
+                depth = 20 if index == 0 else 30
+                profile.Shape = Part.makePolygon(
+                    [App.Vector(0, 0, 0), App.Vector(20, 0, 0),
+                     App.Vector(20, depth, 0), App.Vector(0, depth, 0), App.Vector()]
+                )
+                profile.Placement = stub.Placement
+                part.addObject(profile)
+                profiles.append(profile)
+            first = doc.addObject("Part::FeaturePython", "BaseFace")
+            SMShapedFlange(first, [profiles[0]], part)
+            first.ThicknessSide = "Normal"
+            part.addObject(first)
+            second = doc.addObject("Part::FeaturePython", "WallFace")
+            SMShapedFlange(second, [profiles[1]], part, first)
+            part.addObject(second)
+            part.Tip = second.Name
+            doc.recompute()
+            self.assertEqual("Sketch plane", second.WallPosition)
+            for mode, offset, y_min in (("Material Outside", 0, -5),
+                                        ("Thickness Outside", 0, -2),
+                                        ("Material Inside", 0, 0),
+                                        ("Offset", 3, -8), ("Offset", -1.25, -3.75)):
+                second.WallPosition = mode
+                second.BendOffset = offset
+                doc.recompute()
+                self.assertTrue(second.Shape.isValid())
+                self.assertAlmostEqual(y_min, second.Shape.BoundBox.YMin)
+            part.DefaultBendRadius = 4
+            part.Thickness = 3
+            doc.recompute()
+            self.assertAlmostEqual(-5.75, second.Shape.BoundBox.YMin)
+            second.BendOffset = "-0.125 in"
+            doc.recompute()
+            self.assertAlmostEqual(-3.175, second.BendOffset.Value)
+            self.assertAlmostEqual(-3.825, second.Shape.BoundBox.YMin)
+            volume = second.Shape.Volume
+            with tempfile.TemporaryDirectory() as directory:
+                path = os.path.join(directory, "PositionedFace.FCStd")
+                doc.saveAs(path)
+                App.closeDocument(doc.Name)
+                doc = App.openDocument(path)
+                self.assertIsInstance(doc.WallFace.Proxy, SMShapedFlange)
+                doc.WallFace.touch()
+                doc.recompute()
+                self.assertEqual("Offset", doc.WallFace.WallPosition)
+                self.assertAlmostEqual(-3.175, doc.WallFace.BendOffset.Value)
+                self.assertTrue(doc.WallFace.Shape.isValid())
+                self.assertAlmostEqual(volume, doc.WallFace.Shape.Volume)
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_deleted_face_tip_retreats_to_previous_feature(self):
         doc = App.newDocument("ShapedFlangeDeletedTip")
         try:

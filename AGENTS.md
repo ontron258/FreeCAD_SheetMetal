@@ -93,9 +93,16 @@ Its current responsibilities include:
 - Panels on intersecting sketch planes.
 - Automatic bends along shared collinear edges.
 - Per-feature bend radius and thickness-side settings.
+- Per-feature wall position: sketch-plane placement or Make Wall bend-start
+  offsets (Material Outside, Material Inside, Thickness Outside, signed Offset).
 - Part-level thickness and defaults through the `Sheet Metal Part` `App::Part`.
 - Rectangle, round, and finite-kerf tear bend reliefs.
 - Cumulative feature history through `PreviousFeature`.
+
+`WallPosition` and `BendOffset` belong to each Face stage. Keep `Sketch plane` as
+the default for existing geometry. Position added panels from the first connected
+panel, propagate their displacement through later stages, and include these inputs
+in the runtime shape cache. Sketch placements remain modeling inputs, not outputs.
 
 The internal command and serialized object names still use
 `ShapedFlange` for compatibility. The user-facing command and tree labels use

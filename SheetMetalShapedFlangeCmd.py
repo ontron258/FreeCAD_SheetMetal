@@ -38,6 +38,7 @@ smEpsilon = SheetMetalTools.smEpsilon
 
 smShapedFlangeDefaultVars = ["BendRadius"]
 RELIEF_TYPES = ["None", "Tear", "Rectangle", "Round"]
+WALL_POSITIONS = ["Sketch plane", "Material Outside", "Material Inside", "Thickness Outside", "Offset"]
 FACE_GEOMETRY_VERSION = 1
 _BEND_CLIP_CACHE_LIMIT = 128
 _bend_clip_cache = OrderedDict()
@@ -703,6 +704,7 @@ def _staged_bend_data(
         first["face"], first["mid_offset"],
         second["face"], second["mid_offset"],
     )
+    origin = origin.add(_scaled(axis, first["mid_offset"].dot(axis)))
     mid_radius = radius + thickness * 0.5
     half_angle = panel_angle * 0.5
     setback = mid_radius / math.tan(half_angle)
@@ -716,10 +718,25 @@ def _staged_bend_data(
     radial2 = _unit(tangent_mid2.sub(center), "Cannot determine second bend tangent.")
     radial_mid = _unit(radial1.add(radial2), "Cannot determine bend arc.")
 
-    tangent_end1 = tangent_ref1.add(_scaled(axis, p0.distanceToPoint(p1)))
-    tangent_end2 = tangent_ref2.add(_scaled(axis, p0.distanceToPoint(p1)))
-    cut1 = Part.Face(Part.makePolygon([p0, p1, tangent_end1, tangent_ref1, p0]))
-    cut2 = Part.Face(Part.makePolygon([p0, p1, tangent_end2, tangent_ref2, p0]))
+    depth1 = tangent_ref1.sub(p0).dot(inward1)
+    depth2 = tangent_ref2.sub(p0).dot(inward2)
+
+    def tangent_strip(panel, edge, tangent, inward, depth):
+        if abs(depth) <= smEpsilon:
+            return None
+        ends = [tangent, tangent.add(_scaled(axis, p0.distanceToPoint(p1)))]
+        if depth < 0:
+            # Extend shaped end boundaries to an outward bend tangent.
+            for index, endpoint in enumerate((p0, p1)):
+                direction = _edge_direction_from_endpoint(panel["face"], edge, endpoint, smEpsilon)
+                if direction is not None and abs(direction.dot(inward)) > smEpsilon:
+                    ends[index] = ends[index].add(_scaled(
+                        axis, depth * direction.dot(axis) / direction.dot(inward)
+                    ))
+        return Part.Face(Part.makePolygon([p0, p1, ends[1], ends[0], p0]))
+
+    cut1 = tangent_strip(first, first_edge, tangent_ref1, inward1, depth1)
+    cut2 = tangent_strip(second, second_edge, tangent_ref2, inward2, depth2)
     return {
         "p0": p0,
         "p1": p1,
@@ -731,15 +748,59 @@ def _staged_bend_data(
         "radial_mid": radial_mid,
         "inward1": inward1,
         "inward2": inward2,
-        "relief_base_depth1": max(
-            0.0, tangent_ref1.sub(p0).dot(inward1)
-        ),
-        "relief_base_depth2": max(
-            0.0, tangent_ref2.sub(p0).dot(inward2)
-        ),
+        "relief_base_depth1": depth1,
+        "relief_base_depth2": depth2,
         "cut1": cut1,
         "cut2": cut2,
     }
+
+
+def _position_stage_panels(panels, thickness, tolerance):
+    """Place added panels from their parent bend edge, preserving sketch inputs."""
+    if all(panel["stage"].get("wall_position", "Sketch plane") == "Sketch plane"
+           for panel in panels):
+        return
+    connections = []
+    for i, first in enumerate(panels):
+        for j in range(i + 1, len(panels)):
+            for first_edge in first["face"].Edges:
+                for second_edge in panels[j]["face"].Edges:
+                    overlap = _straight_edge_overlap(first_edge, second_edge, tolerance)
+                    if overlap is not None:
+                        connections.append((i, j, first_edge, second_edge, overlap))
+    if not panels:
+        return
+    shifts = {0: FreeCAD.Vector()}
+    while len(shifts) < len(panels):
+        candidates = []
+        for i, j, first_edge, second_edge, overlap in connections:
+            if i in shifts and j not in shifts:
+                candidates.append((j, i, first_edge, second_edge, overlap))
+            elif j in shifts and i not in shifts:
+                candidates.append((i, j, second_edge, first_edge, overlap))
+        if not candidates:
+            return  # The connectivity check below supplies the modeling error.
+        child_index, parent_index, parent_edge, child_edge, overlap = min(
+            candidates, key=lambda entry: (entry[0], entry[1])
+        )
+        parent, child = panels[parent_index], panels[child_index]
+        shift = FreeCAD.Vector(shifts[parent_index])
+        child["mid_offset"] = child["mid_offset"].add(shift)
+        mode = child["stage"].get("wall_position", "Sketch plane")
+        if mode != "Sketch plane":
+            radius = float(child["stage"].get("radius", 1.0))
+            offset = {"Material Outside": 0.0, "Material Inside": -(radius + thickness),
+                      "Thickness Outside": -radius}.get(mode, float(child["stage"].get("offset", 0.0)))
+            data = _staged_bend_data(parent, parent_edge, child, child_edge,
+                                     overlap[0], overlap[1], radius, thickness)
+            if data is not None:
+                current = data["center"].add(_scaled(data["radial1"], radius + thickness / 2))
+                target = overlap[0].add(parent["mid_offset"]).sub(_scaled(data["inward1"], offset))
+                normal = _sketch_normal(child["sketch"])
+                adjustment = _scaled(normal, target.sub(current).dot(normal))
+                child["mid_offset"] = child["mid_offset"].add(adjustment)
+                shift = shift.add(adjustment)
+        shifts[child_index] = shift
 
 
 def _bend_relief_face(endpoint, bend_direction, inward, width, depth, relief_type):
@@ -796,6 +857,10 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
         thickness_side = stage.get("thickness_side", "Centered")
         if thickness_side not in ("Normal", "Reversed", "Centered"):
             raise ValueError(translate("SheetMetal", "Unknown thickness-side setting."))
+        if stage.get("wall_position", "Sketch plane") not in WALL_POSITIONS:
+            raise ValueError(translate("SheetMetal", "Unknown wall position setting."))
+        if not math.isfinite(float(stage.get("offset", 0.0))):
+            raise ValueError(translate("SheetMetal", "Wall offset must be finite."))
         for sketch in stage.get("sketches", []):
             mid_offset = _stage_mid_offset(sketch, thickness, thickness_side)
             for face in _closed_planar_faces(sketch, stage.get("region_operations")):
@@ -804,6 +869,7 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
                         "sketch": sketch,
                         "face": face,
                         "cuts": [],
+                        "extensions": [],
                         "stage_index": stage_index,
                         "stage": stage,
                         "mid_offset": mid_offset,
@@ -811,9 +877,10 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
                     }
                 )
 
+    tolerance = max(smEpsilon * 10.0, thickness * 1.0e-6)
+    _position_stage_panels(panels, thickness, tolerance)
     bends = []
     links = [set() for _panel in panels]
-    tolerance = max(smEpsilon * 10.0, thickness * 1.0e-6)
     for first_index in range(len(panels)):
         first = panels[first_index]
         for second_index in range(first_index + 1, len(panels)):
@@ -832,8 +899,13 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
                     links[first_index].add(second_index)
                     links[second_index].add(first_index)
                     if data is not None:
-                        first["cuts"].append(data["cut1"])
-                        second["cuts"].append(data["cut2"])
+                        if abs(first["mid_offset"].sub(second["mid_offset"]).dot(data["axis"])) > tolerance:
+                            raise ValueError(translate("SheetMetal", "Wall positions shift connected bend edges out of alignment."))
+                        for panel, number in ((first, 1), (second, 2)):
+                            strip = data["cut" + str(number)]
+                            if strip is not None:
+                                kind = "extensions" if data["relief_base_depth" + str(number)] < 0 else "cuts"
+                                panel[kind].append(strip)
                         relief_type = str(
                             owner["stage"].get("relief_type", "None")
                         )
@@ -881,21 +953,21 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
                         ):
                             first["cuts"].append(
                                 _bend_relief_face(
-                                    endpoint,
+                                    endpoint.add(_scaled(data["inward1"], min(0.0, data["relief_base_depth1"]))),
                                     bend_direction,
                                     data["inward1"],
                                     relief_width,
-                                    data["relief_base_depth1"] + relief_depth,
+                                    max(0.0, data["relief_base_depth1"]) + relief_depth,
                                     relief_type,
                                 )
                             )
                             second["cuts"].append(
                                 _bend_relief_face(
-                                    endpoint,
+                                    endpoint.add(_scaled(data["inward2"], min(0.0, data["relief_base_depth2"]))),
                                     bend_direction,
                                     data["inward2"],
                                     relief_width,
-                                    data["relief_base_depth2"] + relief_depth,
+                                    max(0.0, data["relief_base_depth2"]) + relief_depth,
                                     relief_type,
                                 )
                             )
@@ -940,6 +1012,8 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
     solids = []
     for panel in panels:
         face = panel["face"]
+        for extension in panel["extensions"]:
+            face = face.fuse(extension).removeSplitter()
         for cut in panel["cuts"]:
             face = face.cut(cut)
         if face.isNull() or not face.Faces:
@@ -948,13 +1022,10 @@ def makeShapedFlangeStages(stages, thickness=1.0, refine=True):
             )
         sketch_normal = _sketch_normal(panel["sketch"])
         for trimmed_face in face.Faces:
-            if panel["thickness_side"] == "Normal":
-                solid = trimmed_face.extrude(_scaled(sketch_normal, thickness))
-            elif panel["thickness_side"] == "Reversed":
-                solid = trimmed_face.extrude(_scaled(sketch_normal, -thickness))
-            else:
-                solid = trimmed_face.extrude(_scaled(sketch_normal, thickness))
-                solid.translate(_scaled(sketch_normal, -0.5 * thickness))
+            direction = -1.0 if panel["thickness_side"] == "Reversed" else 1.0
+            extrusion = _scaled(sketch_normal, direction * thickness)
+            solid = trimmed_face.extrude(extrusion)
+            solid.translate(panel["mid_offset"].sub(_scaled(extrusion, 0.5)))
             solids.append(solid)
 
     solids.extend(bends)
@@ -1281,6 +1352,8 @@ def _stage_from_feature(feature):
         "region_operations": list(feature.RegionOperations),
         "radius": radius,
         "thickness_side": feature.ThicknessSide,
+        "wall_position": getattr(feature, "WallPosition", "Sketch plane"),
+        "offset": feature.BendOffset.Value if hasattr(feature, "BendOffset") else 0.0,
         "relief_type": part.DefaultReliefType if use_default_relief else feature.ReliefType,
         "relief_width": (
             part.DefaultReliefWidth.Value if use_default_relief else feature.ReliefWidth.Value
@@ -1355,6 +1428,8 @@ def _shaped_flange_cache_key(stages, thickness, refine):
                 tuple(stage.get("region_operations", ())),
                 float(stage.get("radius", 1.0)),
                 str(stage.get("thickness_side", "Centered")),
+                str(stage.get("wall_position", "Sketch plane")),
+                float(stage.get("offset", 0.0)),
                 str(stage.get("relief_type", "None")),
                 float(stage.get("relief_width", 0.0)),
                 float(stage.get("relief_depth", 0.0)),
@@ -1370,6 +1445,14 @@ def _shaped_flange_cache_key(stages, thickness, refine):
 
 class SMShapedFlange:
     """One cumulative Face operation in a SheetMetalPart history."""
+
+    def dumps(self):
+        # BREP digests and OCC shapes are transient recompute caches.
+        return None
+
+    def loads(self, state):
+        self._shape_cache_key = None
+        self._shape_cache_result = None
 
     def __init__(self, obj, sketches, sheet_metal_part, previous_feature=None):
         if "SheetMetalType" not in obj.PropertiesList:
@@ -1414,6 +1497,19 @@ class SMShapedFlange:
             )
             obj.ThicknessSide = ["Normal", "Reversed", "Centered"]
             obj.ThicknessSide = "Centered"
+        if "WallPosition" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyEnumeration", "WallPosition", "Face Parameters",
+                translate("App::Property", "Position added walls from the parent bend edge, or retain their sketch planes"),
+            )
+            obj.WallPosition = WALL_POSITIONS
+            obj.WallPosition = "Sketch plane"
+        if "BendOffset" not in obj.PropertiesList:
+            obj.addProperty(
+                "App::PropertyDistance", "BendOffset", "Face Parameters",
+                translate("App::Property", "Bend start offset from the parent edge; positive extends outward, negative trims inward"),
+            ).BendOffset = 0.0
+        obj.setEditorMode("BendOffset", 0 if obj.WallPosition == "Offset" else 1)
         if "RegionOperations" not in obj.PropertiesList:
             obj.addProperty(
                 "App::PropertyStringList",
@@ -1470,6 +1566,10 @@ class SMShapedFlange:
             translate("App::Property", "Bend relief depth; slit extension for Tear"), 1.0,
             "Relief",
         )
+
+    def onChanged(self, obj, prop):
+        if prop == "WallPosition" and "BendOffset" in obj.PropertiesList:
+            obj.setEditorMode("BendOffset", 0 if obj.WallPosition == "Offset" else 1)
 
     def execute(self, fp):
         self.addVerifyProperties(fp)
@@ -1704,6 +1804,35 @@ if SheetMetalTools.isGuiLoaded():
                 translate("SheetMetal", "Thickness side"), self.thickness_side
             )
             SheetMetalTools.taskConnectEnum(obj, self.thickness_side, "ThicknessSide")
+
+            self.wall_position = QtGui.QComboBox()
+            self.wall_position.addItems([translate("SheetMetal", value) for value in WALL_POSITIONS])
+            self.wall_position.setToolTip(translate(
+                "SheetMetal", "Sketch plane retains the profile placement. Other modes locate each added wall from its parent bend edge."
+            ))
+            parameter_layout.addRow(translate("SheetMetal", "Wall position"), self.wall_position)
+            self.bend_offset = Gui.UiLoader().createWidget("Gui::QuantitySpinBox")
+            self.bend_offset.setProperty("minimum", -1e9)
+            self.bend_offset.setProperty("maximum", 1e9)
+            self.bend_offset.setToolTip(translate(
+                "SheetMetal", "Positive extends the parent panel outward; negative moves the bend into it."
+            ))
+            parameter_layout.addRow(translate("SheetMetal", "Bend offset"), self.bend_offset)
+            self.bend_offset.setProperty("value", obj.BendOffset)
+            Gui.ExpressionBinding(self.bend_offset).bind(obj, "BendOffset")
+            self.bend_offset.setProperty("keyboardTracking", False)
+            # The default valueChanged signal carries rounded display text.
+            # Read the full internal value, including converted inch inputs.
+            self.bend_offset.valueChanged.connect(
+                lambda _value: SheetMetalTools._taskUpdateValue(
+                    self.bend_offset.property("rawValue"), obj, "BendOffset", None
+                )
+            )
+            self.bend_offset.setEnabled(obj.WallPosition == "Offset")
+            SheetMetalTools.taskConnectEnum(
+                obj, self.wall_position, "WallPosition",
+                lambda _value: self.bend_offset.setEnabled(obj.WallPosition == "Offset"),
+            )
 
             self.default_radius = QtGui.QCheckBox(
                 translate("SheetMetal", "Use part default bend radius")

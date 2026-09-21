@@ -90,6 +90,29 @@ restart without copying addon files.
    links to real Unfold objects; arranging those links does not change the model.
 5. Use the flat-pattern/DXF export workflow for cutting and bend information.
 
+### Face / Shaped Flange wall positioning
+
+Double-click a **Face** feature and use **Wall position** under **Face parameters**.
+**Sketch plane** preserves the existing behavior: Normal, Reversed and Centered
+set where the thickness lies relative to each sketch. The other modes position
+added walls from their parent bend edge, using the same bend-start offsets as
+Make Wall:
+
+| Wall position | Bend-start offset from the parent edge |
+| --- | --- |
+| Material Outside | 0; the bend starts at the edge |
+| Material Inside | Inward by inside radius + thickness |
+| Thickness Outside | Inward by inside radius |
+| Offset | The signed **Bend offset** value; positive extends outward, negative trims inward |
+
+The first connected panel is the fixed reference. Subsequent walls and their
+descendants follow the positioning while the input sketches stay in place.
+Thickness side still sets the reference panel's material side; a bend-based wall
+position determines the added wall's material location. With multiple profiles
+in one feature, profile order establishes the first panel. Wall height and outline
+continue to come from the sketches. Radius and thickness changes update these
+offsets automatically. The custom offset supports expressions and document units.
+
 For wire parts, see [Welded mesh parts](WELDED_MESH.md) for creating formed and
 flat mesh, setting wire spacing and weld penetration, and editing the wire sketches.
 Each new mesh product owns one sheet-metal Body with the full wire-envelope

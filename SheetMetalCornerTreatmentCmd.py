@@ -84,6 +84,10 @@ def cornerEdges(shape, names):
     thickness = _sheet_thickness(shape)
     result = []
     for name in names:
+        if any(part.startswith("?") for part in name.split(".")):
+            raise CornerTreatmentError(translate(
+                "SheetMetal", "Corner reference no longer resolves: %1. Reselect this corner on the source sheet."
+            ).replace("%1", name), [name])
         try:
             element = shape.getElement(SheetMetalTools.getElementFromTNP(name))
         except Exception as error:

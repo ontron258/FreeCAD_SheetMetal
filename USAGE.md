@@ -160,6 +160,10 @@ the preview succeeds, and OK cannot accept a failed feature. The feature's
 read-only **LastError** and **FailedCorners** properties also record the reason
 and affected selections for a failed recompute.
 
+After changes to earlier features, a missing bend or corner reference must be
+reselected on its source feature. Unresolved references produce an error instead
+of reusing an old edge number that could now belong to a different edge.
+
 Dimension fields follow the document's unit system: mm in standard metric
 documents and inches in imperial documents. Bare numbers use the displayed
 unit. Changing the unit system updates the display without changing the

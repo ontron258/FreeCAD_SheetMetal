@@ -99,6 +99,14 @@ class TestCornerTreatment(unittest.TestCase):
         with self.assertRaises(ValueError):
             makeCornerTreatment(result, [curved])
 
+    def test_unresolved_reference_is_not_reused_as_an_edge_number(self):
+        for name in ("?" + self.edges[0], "Base.?" + self.edges[0]):
+            with self.subTest(name=name):
+                with self.assertRaises(CornerTreatmentError) as raised:
+                    makeCornerTreatment(self.sheet, [name], "Round", 3)
+                self.assertEqual(raised.exception.corners, [name])
+                self.assertIn("Reselect", str(raised.exception))
+
     def test_size_failure_identifies_only_obstructed_corner_and_its_aliases(self):
         sheet = _sheet_with_small_tab()
         good = _vertex_name(sheet, App.Vector(0, 0, 0))

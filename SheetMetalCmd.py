@@ -1880,6 +1880,17 @@ class SMBendWall:
         """
         self.addVerifyProperties(fp)
 
+        base, names = fp.baseObject
+        unresolved = [name for name in names
+                      if any(part.startswith("?") for part in name.split("."))]
+        if base is None or not names or unresolved:
+            # A '?' marks a failed topological reference. Stripping it and
+            # using the old edge number can bend a completely different edge.
+            fp.Shape = Part.Shape()
+            raise ValueError(translate(
+                "SheetMetal", "Bend reference no longer resolves: %1. Reselect the bend edge or face."
+            ).replace("%1", ", ".join(unresolved) if unresolved else "baseObject"))
+
         # Restrict some params.
         fp.miterangle1.Value = smRestrict(fp.miterangle1.Value, -80.0, 80.0)
         fp.miterangle2.Value = smRestrict(fp.miterangle2.Value, -80.0, 80.0)

@@ -1,6 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
- <path d="M7 13H42L57 28V51H7Z" fill="#729fcf" stroke="#172a40" stroke-width="2.5" stroke-linejoin="round"/>
- <path d="M7 13H42L57 28H25A18 18 0 0 0 7 46Z" fill="#c4ddf3" stroke="#172a40" stroke-width="2.5" stroke-linejoin="round"/>
- <path d="M7 46A18 18 0 0 1 25 28M42 13L57 28" fill="none" stroke="#f57900" stroke-width="5"/>
- <path d="M7 46V51M57 28V51" stroke="#172a40" stroke-width="2.5"/>
+  <defs>
+    <linearGradient id="sheetHighlight" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.65"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="roundFace" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#73d216"/>
+      <stop offset="0.5" stop-color="#8ae234"/>
+      <stop offset="1" stop-color="#4e9a06"/>
+    </linearGradient>
+  </defs>
+  <!-- Match the workbench's blue sheet, green modified face and 2 px outlines. -->
+  <g stroke-width="2" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M4 35 18 43V51L4 43Z" fill="#3465a4" stroke="#0b1523"/>
+    <path d="M46 37 60 23V31L46 45Z" fill="#729fcf" stroke="#0b1523"/>
+    <path d="M18 43C25.732 47.418 38.268 44.732 46 37V45C38.268 52.732 25.732 55.418 18 51Z"
+          fill="url(#roundFace)" stroke="#17220b"/>
+    <path d="M32 7 60 23 46 37C38.268 44.732 25.732 47.418 18 43L4 35Z"
+          fill="#729fcf" stroke="#0b1523"/>
+    <path d="M32.3 10 56.7 23.9 44.6 35.6C37.4 42.8 25.8 45.1 19 41.3L7.3 34.5Z"
+          fill="url(#sheetHighlight)" stroke="#729fcf"/>
+    <path d="M21 47C27.5 50 37 47.8 43 42.5" fill="none" stroke="#b5ee80"/>
+  </g>
 </svg>

@@ -82,6 +82,21 @@ restart without copying addon files.
 
 ## Basic modeling workflow
 
+The workbench has six movable toolbars and matching **Sheet Metal** submenus:
+
+| Group | Commands |
+| --- | --- |
+| Create | Sketch, Face, Base Wall, Base Shape, From Solid |
+| Shape | Wall, Fold, Bend, Hem, Extend Face, Extend by Sketch, Forming |
+| Cuts and Corners | Sketch on Sheet, Cutout, Junction, Relief, Corner Relief, Corner Round / Chamfer |
+| Assembly | Place by LCS, Bolt Connection, Connected Pattern, Mirror |
+| Unfold | Unfold, Update Unfolds, Flat Pattern Workspace |
+| Mesh | Create Welded Mesh, Make Mesh Wires Editable |
+
+Show or hide each toolbar from **View → Toolbars**, or drag its handle to move it.
+The right-click Sheet Metal menu uses the same order, with separators between
+groups. Engineering mode adds Unattended Unfold beside Unfold.
+
 1. Create a Sheet Metal Part and select its material/thickness/default radius.
 2. Create a base wall or sketch-driven Face feature, then add the required bends
    and subsequent Face features. Keep a part's thickness at the owning part.
@@ -123,8 +138,8 @@ sketch pair. Switch the part's **Representation** property to inspect each view.
 
 After creating the walls and bends, Ctrl-select one or more sharp outline corner
 vertices on the final sheet feature. You can also select the straight, short
-edges running through the sheet thickness. Choose **Sheet Metal → Corner Round /
-Chamfer** from the menu or toolbar, then choose **Round** and a **Radius**, or
+edges running through the sheet thickness. Choose **Sheet Metal → Cuts and Corners
+→ Corner Round / Chamfer** from the menu or toolbar, then choose **Round** and a **Radius**, or
 **Chamfer** and a **Chamfer distance** (equal setback along both sides).
 
 Use **Select corners** to edit the set, then **Preview** to apply it. All corners

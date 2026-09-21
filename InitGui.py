@@ -81,46 +81,65 @@ class SMWorkbench(Workbench):
         import SheetMetalFromSolid
         import SheetMetalWeldedMeshCmd
 
-        self.list = [
-            "SheetMetal_BaseShape",
-            "SheetMetal_NewSketch",
-            "SheetMetal_AddBase",
-            "SheetMetal_ShapedFlange",
-            "SheetMetal_FromSolid",
-            "SheetMetal_WeldedMesh",
-            "SheetMetal_EditableMesh",
-            "SheetMetal_AddWall",
-            "SheetMetal_AddHem",
-            "SheetMetal_Extrude",
-            "SheetMetal_ExtendBySketch",
-            "SheetMetal_AddFoldWall",
-            "SheetMetal_Unfold",
+        unfold_commands = [
+            "SheetMetal_Unfold", "SheetMetal_UnfoldUpdate",
             "SheetMetal_ToggleFlatPatternWorkspace",
-            "SheetMetal_UnfoldUpdate",
-            "SheetMetal_AddCornerRelief",
-            "SheetMetal_CornerTreatment",
-            "SheetMetal_AddRelief",
-            "SheetMetal_AddJunction",
-            "SheetMetal_AddBend",
-            "SheetMetal_SketchOnSheet",
-            "SheetMetal_AddCutout",
-            "SheetMetal_BoltConnection",
-            "SheetMetal_PlacePartByLCS",
-            "SheetMetal_ConnectedPartPattern",
-            "SheetMetal_MirroredPart",
-            "SheetMetal_Forming",
-            ]
-
+        ]
         if engineering_mode_enabled():
-            self.list.insert(self.list.index("SheetMetal_Unfold") + 1,
-                             "SheetMetal_UnattendedUnfold")
+            unfold_commands.insert(1, "SheetMetal_UnattendedUnfold")
 
-        # Create a new toolbar with commands.
-        self.appendToolbar(FreeCAD.Qt.translate("SheetMetal", "Sheet Metal"), self.list)
-        # Create a new menu.
-        self.appendMenu(FreeCAD.Qt.translate("SheetMetal", "&Sheet Metal"), self.list)
-        # # Append a submenu to an existing menu.
-        # self.appendMenu(["An existing Menu","My submenu"],self.list)
+        # One definition keeps toolbar, menu and context-menu ordering aligned.
+        self.commandGroups = [
+            (FreeCAD.Qt.translate("SheetMetal", "Create"),
+             FreeCAD.Qt.translate("SheetMetal", "Sheet Metal Create"), [
+                 "SheetMetal_NewSketch",
+                 "SheetMetal_ShapedFlange",
+                 "SheetMetal_AddBase",
+                 "SheetMetal_BaseShape",
+                 "SheetMetal_FromSolid",
+             ]),
+            (FreeCAD.Qt.translate("SheetMetal", "Shape"),
+             FreeCAD.Qt.translate("SheetMetal", "Sheet Metal Shape"), [
+                 "SheetMetal_AddWall",
+                 "SheetMetal_AddFoldWall",
+                 "SheetMetal_AddBend",
+                 "SheetMetal_AddHem",
+                 "SheetMetal_Extrude",
+                 "SheetMetal_ExtendBySketch",
+                 "SheetMetal_Forming",
+             ]),
+            (FreeCAD.Qt.translate("SheetMetal", "Cuts and Corners"),
+             FreeCAD.Qt.translate("SheetMetal", "Sheet Metal Cuts and Corners"), [
+                 "SheetMetal_SketchOnSheet",
+                 "SheetMetal_AddCutout",
+                 "SheetMetal_AddJunction",
+                 "SheetMetal_AddRelief",
+                 "SheetMetal_AddCornerRelief",
+                 "SheetMetal_CornerTreatment",
+             ]),
+            (FreeCAD.Qt.translate("SheetMetal", "Assembly"),
+             FreeCAD.Qt.translate("SheetMetal", "Sheet Metal Assembly"), [
+                 "SheetMetal_PlacePartByLCS",
+                 "SheetMetal_BoltConnection",
+                 "SheetMetal_ConnectedPartPattern",
+                 "SheetMetal_MirroredPart",
+             ]),
+            (FreeCAD.Qt.translate("SheetMetal", "Unfold"),
+             FreeCAD.Qt.translate("SheetMetal", "Sheet Metal Unfold"), unfold_commands),
+            (FreeCAD.Qt.translate("SheetMetal", "Mesh"),
+             FreeCAD.Qt.translate("SheetMetal", "Sheet Metal Mesh"), [
+                 "SheetMetal_WeldedMesh",
+                 "SheetMetal_EditableMesh",
+             ]),
+        ]
+        menu = FreeCAD.Qt.translate("SheetMetal", "&Sheet Metal")
+        self.list = []
+        for section, toolbar, commands in self.commandGroups:
+            self.appendToolbar(toolbar, commands)
+            self.appendMenu([menu, section], commands)
+            if self.list:
+                self.list.append("Separator")
+            self.list.extend(commands)
         Gui.addPreferencePage(os.path.join(SMWBPath, "Resources/panels/SMprefs.ui"), "SheetMetal")
         Gui.addIconPath(SMIconPath)
 

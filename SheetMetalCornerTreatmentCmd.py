@@ -250,8 +250,26 @@ class SMCornerTreatment:
                             translate("App::Property", "Corners that failed at the requested size"))
         obj.setEditorMode("FailedCorners", 1)
 
+    def onBeforeChange(self, obj, prop):
+        if prop == "Treatment":
+            self._previousSize = None
+            # Restoring and undo/redo must reproduce saved property values.
+            # Only an explicit mode change carries the current dimension over.
+            if not obj.Document.Restoring and not obj.Document.Transacting:
+                name = "Radius" if obj.Treatment == "Round" else "ChamferSize"
+                if name in obj.PropertiesList:
+                    self._previousSize = (str(obj.Treatment), getattr(obj, name).Value)
+
     def onChanged(self, obj, prop):
         if prop == "Treatment":
+            previous = getattr(self, "_previousSize", None)
+            self._previousSize = None
+            if previous is not None and previous[0] != obj.Treatment:
+                name = "Radius" if obj.Treatment == "Round" else "ChamferSize"
+                # Keep deliberately expression-driven dimensions intact.
+                if name in obj.PropertiesList and not any(
+                        path == name for path, _expression in obj.ExpressionEngine):
+                    setattr(obj, name, previous[1])
             for name, mode in (("Radius", "Round"), ("ChamferSize", "Chamfer")):
                 if name in obj.PropertiesList:
                     obj.setEditorMode(name, 0 if obj.Treatment == mode else 2)
@@ -327,7 +345,7 @@ if SheetMetalTools.isGuiLoaded():
                 "QLabel { color: #9f1239; background: #fff1f2; "
                 "border: 1px solid #fda4af; padding: 8px; }")
             SheetMetalTools.taskConnectEnum(obj, self.form.Treatment, "Treatment",
-                                           self.parameterChanged)
+                                           self.treatmentChanged)
             for name in ("Radius", "ChamferSize"):
                 spin = getattr(self.form, name)
                 spin.setProperty("autoNormalize", False)
@@ -335,6 +353,7 @@ if SheetMetalTools.isGuiLoaded():
                 SheetMetalTools.taskConnectSpin(obj, spin, name, self.parameterChanged)
             FreeCAD.addDocumentObserver(self)
             self._documentObserverActive = True
+            self.updateUnits()
             self.updateMode()
             self.updateFeedback()
 
@@ -350,10 +369,15 @@ if SheetMetalTools.isGuiLoaded():
             for name in ("Radius", "ChamferSize"):
                 spin = getattr(self.form, name)
                 blocked = spin.blockSignals(True)
+                # QuantitySpinBox otherwise parses its own rounded display
+                # text (e.g. 0.125 in -> 0.13 in) back into its raw value.
+                editor = spin.findChild(QtGui.QLineEdit)
+                editorBlocked = editor.blockSignals(True)
                 try:
                     spin.setProperty("unit", cornerLengthUnit(self.obj.Document))
                     spin.setProperty("value", getattr(self.obj, name))
                 finally:
+                    editor.blockSignals(editorBlocked)
                     spin.blockSignals(blocked)
 
         def cleanup(self, *_args):
@@ -383,6 +407,12 @@ if SheetMetalTools.isGuiLoaded():
         def parameterChanged(self, _value=None):
             self.updateMode()
             self.updateFeedback()
+
+        def treatmentChanged(self, _value=None):
+            # The proxy carries the old mode's size to the active property.
+            # Refresh only on a mode change, not while a dimension is edited.
+            self.updateUnits()
+            self.parameterChanged()
 
         def updateFeedback(self):
             if self._closed:

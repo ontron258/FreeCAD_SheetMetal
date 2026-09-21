@@ -141,6 +141,10 @@ vertices on the final sheet feature. You can also select the straight, short
 edges running through the sheet thickness. Choose **Sheet Metal → Cuts and Corners
 → Corner Round / Chamfer** from the menu or toolbar, then choose **Round** and a **Radius**, or
 **Chamfer** and a **Chamfer distance** (equal setback along both sides).
+Switching between Round and Chamfer carries the current dimension into the new
+mode, including changes in the property editor. An explicit expression on the
+destination dimension remains in control. Opening a saved file preserves its
+stored dimensions.
 
 Use **Select corners** to edit the set, then **Preview** to apply it. All corners
 in one feature share its size; add another feature for a different size. Selecting

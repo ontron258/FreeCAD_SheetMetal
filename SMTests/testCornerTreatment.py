@@ -181,6 +181,75 @@ class TestCornerTreatment(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_switch_treatment_reuses_size_after_restore_and_supports_undo(self):
+        doc = App.newDocument("CornerModeSwitch")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = self.sheet
+            feature = doc.addObject("Part::FeaturePython", "Corners")
+            SMCornerTreatment(feature, base, self.edges)
+            feature.Treatment = "Chamfer"
+            feature.ChamferSize = 1
+            # Reproduce a legacy file with an oversized, hidden radius.
+            feature.Radius = 77.20076
+            doc.recompute()
+            with tempfile.TemporaryDirectory() as directory:
+                filename = os.path.join(directory, "Corners.FCStd")
+                doc.saveAs(filename)
+                App.closeDocument(doc.Name)
+                doc = App.openDocument(filename)
+                feature = doc.Corners
+                self.assertEqual(feature.Treatment, "Chamfer")
+                self.assertAlmostEqual(feature.Radius.Value, 77.20076)
+                self.assertEqual(feature.ChamferSize.Value, 1)
+                doc.UndoMode = 1
+                doc.openTransaction("Round corners")
+                feature.Treatment = "Round"
+                doc.recompute()
+                self.assertEqual(feature.Radius.Value, 1)
+                self.assertSolid(feature.Shape)
+                self.assertAlmostEqual(feature.Shape.Volume, 4800 - 8 * (1 - math.pi / 4))
+                doc.commitTransaction()
+                doc.undo()
+                doc.recompute()
+                self.assertEqual(feature.Treatment, "Chamfer")
+                self.assertEqual(feature.ChamferSize.Value, 1)
+                self.assertAlmostEqual(feature.Radius.Value, 77.20076)
+                self.assertAlmostEqual(feature.Shape.Volume, 4796)
+                doc.redo()
+                doc.recompute()
+                self.assertEqual(feature.Treatment, "Round")
+                self.assertEqual(feature.Radius.Value, 1)
+                self.assertSolid(feature.Shape)
+                feature.Radius = 3.175
+                feature.Treatment = "Chamfer"
+                self.assertEqual(feature.ChamferSize.Value, 3.175)
+                feature.Treatment = "Round"
+                doc.recompute()
+                self.assertEqual(feature.Radius.Value, 3.175)
+                self.assertSolid(feature.Shape)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_switch_treatment_preserves_destination_expression(self):
+        doc = App.newDocument("CornerModeExpression")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = self.sheet
+            feature = doc.addObject("Part::FeaturePython", "Corners")
+            SMCornerTreatment(feature, base, self.edges)
+            feature.Treatment = "Chamfer"
+            feature.setExpression("Radius", "2 mm")
+            feature.ChamferSize = 3
+            doc.recompute()
+            feature.Treatment = "Round"
+            doc.recompute()
+            self.assertEqual(feature.Radius.Value, 2)
+            self.assertIn(("Radius", "2 mm"), feature.ExpressionEngine)
+            self.assertSolid(feature.Shape)
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_feature_stays_in_part_or_body_and_advances_tip(self):
         from SheetMetalShapedFlangeCmd import createSheetMetalPart
         from SheetMetalMaterial import _shape_from_part_tip

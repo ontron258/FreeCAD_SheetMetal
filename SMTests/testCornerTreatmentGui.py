@@ -148,6 +148,34 @@ class TestCornerTreatmentGui(unittest.TestCase):
         Gui.Selection.addSelection(self.base, "Face1")
         self.assertTrue(Gui.Selection.getSelectionEx())
 
+    def test_switch_treatment_carries_displayed_size_in_inches(self):
+        self.doc.UnitSystem = 3
+        panel = self.createPanel()
+        panel.form.Treatment.setCurrentIndex(1)
+        panel.obj.Radius = 77.20076  # Hidden value retained by older versions.
+        panel.form.Treatment.setCurrentIndex(0)
+        self.assertEqual(panel.obj.Radius.Value, 1)
+        self.assertAlmostEqual(panel.form.Radius.property("rawValue"), 1)
+        self.assertEqual(panel.form.Radius.property("unit"), "in")
+        self.assertTrue(panel.form.ErrorMessage.isHidden())
+        self.assertTrue(panel.obj.Shape.isValid())
+        panel.form.Radius.setFocus()
+        panel.form.Radius.selectAll()
+        QTest.keyClicks(panel.form.Radius, "0.125")
+        QTest.keyClick(panel.form.Radius, QtCore.Qt.Key_Tab)
+        self.assertAlmostEqual(panel.obj.Radius.Value, 3.175)
+        for mode in (1, 0, 1, 0):
+            panel.form.Treatment.setCurrentIndex(mode)
+            spin = panel.form.ChamferSize if mode else panel.form.Radius
+            self.assertAlmostEqual(spin.property("rawValue"), 3.175)
+            self.assertEqual(spin.property("unit"), "in")
+            self.assertFalse(spin.isHidden())
+            self.assertTrue(panel.form.ErrorMessage.isHidden())
+            self.assertTrue(panel.obj.Shape.isValid())
+        self.assertTrue(panel.accept())
+        self.assertEqual(panel.obj.Treatment, "Round")
+        self.assertAlmostEqual(panel.obj.Radius.Value, 3.175)
+
     def test_document_units_display_and_parse_bare_dimensions(self):
         self.doc.UnitSystem = 3
         App.Units.setSchema(0)  # The document setting wins over the global setting.
@@ -155,6 +183,7 @@ class TestCornerTreatmentGui(unittest.TestCase):
         for spin in (panel.form.Radius, panel.form.ChamferSize):
             self.assertEqual(spin.property("unit"), "in")
             self.assertIn("in", spin.property("text"))
+            self.assertAlmostEqual(spin.property("rawValue"), 1)
         # Unitless input must mean inches, not FreeCAD's internal millimetres.
         panel.form.Radius.setFocus()
         panel.form.Radius.selectAll()

@@ -10,7 +10,7 @@ import Part
 
 from SheetMetalCornerTreatmentCmd import (
     SMCornerTreatment, CornerSelectionGate, adoptCornerFeature, cornerEdges,
-    cornerLengthUnit, makeCornerTreatment,
+    cornerLengthUnit, makeCornerTreatment, CornerTreatmentError,
 )
 
 
@@ -23,6 +23,13 @@ def _edge_names(shape, length=2.0):
 def _vertex_name(shape, point):
     return next("Vertex%d" % (index + 1) for index, vertex in enumerate(shape.Vertexes)
                 if vertex.Point.distanceToPoint(point) < 1.e-6)
+
+
+def _sheet_with_small_tab():
+    points = [App.Vector(x, y, 0) for x, y in (
+        (0, 0), (60, 0), (60, 40), (30, 40), (30, 42),
+        (28, 42), (28, 40), (0, 40), (0, 0))]
+    return Part.Face(Part.makePolygon(points)).extrude(App.Vector(0, 0, 1.5))
 
 
 class TestCornerTreatment(unittest.TestCase):
@@ -91,6 +98,33 @@ class TestCornerTreatment(unittest.TestCase):
                       if isinstance(edge.Curve, Part.Circle))
         with self.assertRaises(ValueError):
             makeCornerTreatment(result, [curved])
+
+    def test_size_failure_identifies_only_obstructed_corner_and_its_aliases(self):
+        sheet = _sheet_with_small_tab()
+        good = _vertex_name(sheet, App.Vector(0, 0, 0))
+        bad = [_vertex_name(sheet, App.Vector(30, 42, z)) for z in (0, 1.5)]
+        for mode in ("Round", "Chamfer"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(CornerTreatmentError) as raised:
+                    makeCornerTreatment(sheet, [good] + bad, mode, 3)
+                self.assertEqual(raised.exception.corners, bad)
+                for name in bad:
+                    self.assertIn(name, str(raised.exception))
+                self.assertSolid(makeCornerTreatment(sheet, [good], mode, 3))
+                self.assertSolid(makeCornerTreatment(sheet, [good] + bad, mode, 1))
+                self.assertAlmostEqual(sheet.Volume, 3606)
+
+    def test_overlapping_treatments_report_combination_failure(self):
+        sheet = Part.makeBox(10, 20, 2)
+        names = [_vertex_name(sheet, App.Vector(x, 0, 0)) for x in (0, 10)]
+        for mode in ("Round", "Chamfer"):
+            with self.subTest(mode=mode):
+                for name in names:
+                    self.assertSolid(makeCornerTreatment(sheet, [name], mode, 6))
+                with self.assertRaises(CornerTreatmentError) as raised:
+                    makeCornerTreatment(sheet, names, mode, 6)
+                self.assertEqual(raised.exception.corners, names)
+                self.assertIn("cannot be combined", str(raised.exception))
 
     def test_concave_outline_corner(self):
         sheet = self.sheet.cut(Part.makeBox(30, 20, 2, App.Vector(30, 20, 0))).removeSplitter()
@@ -209,14 +243,17 @@ class TestCornerTreatment(unittest.TestCase):
                 feature.Proxy.execute(feature)
             self.assertTrue(feature.Shape.isNull())
             self.assertIn("Reduce the size", feature.LastError)
+            self.assertEqual(feature.FailedCorners, self.edges)
             feature.Radius = 3
             feature.baseObject = (base, ["Face1"])
             with self.assertRaises(ValueError):
                 feature.Proxy.execute(feature)
             self.assertIn("Face1", feature.LastError)
+            self.assertEqual(feature.FailedCorners, [])
             feature.baseObject = (base, self.edges)
             feature.Proxy.execute(feature)
             self.assertFalse(feature.LastError)
+            self.assertEqual(feature.FailedCorners, [])
             self.assertSolid(feature.Shape)
         finally:
             App.closeDocument(doc.Name)

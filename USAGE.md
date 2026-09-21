@@ -113,9 +113,14 @@ Reduce the size if neighboring corners or bends leave insufficient room.
 
 While selecting, the tool filters picks to valid corners on the source sheet.
 An invalid or oversized preview shows a red error message in the task panel;
-invalid selection rows are highlighted. The source sheet stays visible until
+invalid selection rows are highlighted. If geometry creation fails, the tool
+identifies and highlights the corners that cannot use the requested size.
+If those corners work individually but fail together, the message identifies
+the combination. Check for nearby bends or intersecting flanges as well as
+the corner size. The source sheet stays visible until
 the preview succeeds, and OK cannot accept a failed feature. The feature's
-read-only **LastError** property also records the reason for a failed recompute.
+read-only **LastError** and **FailedCorners** properties also record the reason
+and affected selections for a failed recompute.
 
 Dimension fields follow the document's unit system: mm in standard metric
 documents and inches in imperial documents. Bare numbers use the displayed

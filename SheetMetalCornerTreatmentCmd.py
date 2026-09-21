@@ -137,6 +137,22 @@ def cornerLengthUnit(doc):
     return FreeCAD.Units.schemaTranslate(FreeCAD.Units.Quantity("1 mm"), schema)[2]
 
 
+class CornerTreatmentError(ValueError):
+    """A failed operation with the source selections that need attention."""
+
+    def __init__(self, message, corners):
+        super().__init__(message)
+        self.corners = list(corners)
+
+
+def _apply_corners(shape, edges, treatment, size):
+    result = (shape.makeFillet(size, edges) if treatment == "Round"
+              else shape.makeChamfer(size, edges))
+    if result.isNull() or not result.isValid() or len(result.Solids) != 1:
+        raise ValueError("Invalid corner result")
+    return result
+
+
 def makeCornerTreatment(shape, names, treatment="Round", size=1.0):
     """Apply one radius or equal-distance chamfer to all selected corners.
 
@@ -149,14 +165,29 @@ def makeCornerTreatment(shape, names, treatment="Round", size=1.0):
         raise ValueError(translate("SheetMetal", "Corner size must be greater than zero."))
     edges = cornerEdges(shape, names)
     try:
-        result = (shape.makeFillet(size, edges) if treatment == "Round"
-                  else shape.makeChamfer(size, edges))
-        if result.isNull() or not result.isValid() or len(result.Solids) != 1:
-            raise ValueError("Invalid corner result")
+        result = _apply_corners(shape, edges, treatment, size)
     except Exception as error:
-        raise ValueError(translate(
-            "SheetMetal", "Cannot create these corners. Reduce the size or change the selection."
-        )) from error
+        # A single obstructed corner otherwise hides which of a large selection
+        # failed. Diagnose only after failure, against the unchanged source.
+        failed_edges = []
+        for edge in edges:
+            try:
+                _apply_corners(shape, [edge], treatment, size)
+            except Exception:
+                failed_edges.append(edge)
+        if failed_edges:
+            failed_names = [name for name in names if any(
+                edge.isSame(failed) for edge in cornerEdges(shape, [name])
+                for failed in failed_edges)]
+            message = translate("SheetMetal", "Cannot create corners at this size: %1.")
+        else:
+            # Individually valid corners can still collide with each other.
+            failed_names = list(names)
+            message = translate("SheetMetal", "These corners cannot be combined at this size: %1.")
+        message = message.replace("%1", ", ".join(failed_names))
+        message += " " + translate(
+            "SheetMetal", "Reduce the size or change the selection. Check nearby edges, bends, and intersecting flanges.")
+        raise CornerTreatmentError(message, failed_names) from error
     return result
 
 
@@ -210,6 +241,10 @@ class SMCornerTreatment:
         SheetMetalTools.smAddStringProperty(obj, "LastError",
             translate("App::Property", "Reason the corner feature could not be built"), "", "Status")
         obj.setEditorMode("LastError", 1)
+        if "FailedCorners" not in obj.PropertiesList:
+            obj.addProperty("App::PropertyStringList", "FailedCorners", "Status",
+                            translate("App::Property", "Corners that failed at the requested size"))
+        obj.setEditorMode("FailedCorners", 1)
 
     def onChanged(self, obj, prop):
         if prop == "Treatment":
@@ -236,11 +271,13 @@ class SMCornerTreatment:
             result = makeCornerTreatment(base.Shape, names, str(obj.Treatment), size)
         except Exception as error:
             obj.LastError = str(error)
+            obj.FailedCorners = getattr(error, "corners", [])
             # Do not present the last successful shape as the requested result.
             obj.Shape = Part.Shape()
             raise
         obj.Shape = result
         obj.LastError = ""
+        obj.FailedCorners = []
 
 
 if SheetMetalTools.isGuiLoaded():
@@ -350,13 +387,14 @@ if SheetMetalTools.isGuiLoaded():
             base, names = self.obj.baseObject
             if self.selParams.SelectState and base is not None:
                 SheetMetalTools.taskPopulateSelectionList(self.form.tree, (base, names))
-                self.invalidNames = []
+                self.invalidNames = list(self.obj.FailedCorners)
                 if error:
                     for name in names:
                         try:
                             cornerEdges(base.Shape, [name])
                         except Exception:
-                            self.invalidNames.append(name)
+                            if name not in self.invalidNames:
+                                self.invalidNames.append(name)
             self.form.ErrorMessage.setText(
                 translate("SheetMetal", "Corner preview failed: ") + error if error else "")
             self.form.ErrorMessage.setVisible(bool(error))
@@ -368,7 +406,7 @@ if SheetMetalTools.isGuiLoaded():
                                        if invalid else QtGui.QBrush())
                     item.setForeground(column, QtGui.QBrush(QtGui.QColor("#9f1239"))
                                        if invalid else QtGui.QBrush())
-                    item.setToolTip(column, self.selectionError if invalid else "")
+                    item.setToolTip(column, error if invalid else "")
             if self.selParams.SelectState:
                 self.obj.Visibility = not bool(error)
                 if base is not None:

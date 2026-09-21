@@ -7,7 +7,7 @@ from unittest import mock
 import FreeCAD as App
 import Part
 import SheetMetalCornerTreatmentCmd as C
-from SMTests.testCornerTreatment import _edge_names
+from SMTests.testCornerTreatment import _edge_names, _sheet_with_small_tab, _vertex_name
 
 if App.GuiUp:
     import FreeCADGui as Gui
@@ -179,3 +179,36 @@ class TestCornerTreatmentGui(unittest.TestCase):
         self.assertAlmostEqual(App.Units.Quantity("1 " + unit).Value, 25.4)
         self.assertIn(unit, panel.form.Radius.property("text"))
         self.assertAlmostEqual(panel.obj.Radius.Value, 3)
+
+    def test_size_failure_highlights_only_failed_corner_and_can_be_removed(self):
+        self.base.Shape = _sheet_with_small_tab()
+        self.doc.recompute()
+        good = _vertex_name(self.base.Shape, App.Vector(0, 0, 0))
+        bad = _vertex_name(self.base.Shape, App.Vector(30, 42, 0))
+        self.edges = [good, bad]
+        panel = self.createPanel()
+        panel.form.AddRemove.click()
+        Gui.Selection.clearSelection()
+        for name in self.edges:
+            Gui.Selection.addSelection(self.base, name)
+        panel.form.AddRemove.click()
+        panel.form.Radius.setProperty("rawValue", 3.0)
+        self.assertEqual(panel.obj.FailedCorners, [bad])
+        self.assertIn(bad, panel.form.ErrorMessage.text())
+        self.assertFalse(panel.accept())
+        rows = {panel.form.tree.topLevelItem(i).text(1): panel.form.tree.topLevelItem(i)
+                for i in range(panel.form.tree.topLevelItemCount())}
+        self.assertEqual(rows[bad].foreground(1).color().name(), "#9f1239")
+        self.assertNotEqual(rows[good].foreground(1).color().name(), "#9f1239")
+        self.assertIn(bad, rows[bad].toolTip(1))
+        panel.form.AddRemove.click()
+        rows = {panel.form.tree.topLevelItem(i).text(1): panel.form.tree.topLevelItem(i)
+                for i in range(panel.form.tree.topLevelItemCount())}
+        rows[bad].setCheckState(0, QtCore.Qt.Checked)
+        panel.form.pushClearSel.click()
+        panel.form.AddRemove.click()
+        self.assertEqual(panel.obj.baseObject[1], [good])
+        self.assertEqual(panel.obj.FailedCorners, [])
+        self.assertTrue(panel.form.ErrorMessage.isHidden())
+        self.assertTrue(panel.obj.Shape.isValid())
+        self.assertTrue(panel.accept())

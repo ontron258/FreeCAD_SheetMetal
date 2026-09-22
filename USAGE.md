@@ -35,14 +35,22 @@ restart together and create a new environment checkpoint after this runtime upda
 
 ## Branches and installation
 
-`main` is the default branch and the configured modeling checkout. It combines
+`main` is the production branch and the configured development checkout. It combines
 the complete histories of `dev` and `feature/collaboration-prototype`, including
 welded mesh parts and the extraction of collaboration into its own addon.
-Continue modeling development on `main`. The previous branches remain available
-for history; `master` mirrors upstream. The old embedded collaboration
+Prepare changes on focused branches and merge them to `main` only after this
+repository's checks pass. The previous branches remain available for history;
+`master` mirrors upstream. The old embedded collaboration
 implementation remains recoverable in Git history.
 
-For a new computer, clone the selected modeling branch:
+Production team computers should not independently clone/pull the moving branch.
+Distribution CI pins the exact `main` commit from every add-on repo, runs their
+combined checks and creates one immutable bundle for the Collaboration server to
+distribute. Branch names select candidates; the recorded commit SHAs and artifact
+hashes identify a release. See Collaboration's
+[team distribution contract](https://github.com/ontron258/FreeCAD_Collaboration/blob/main/docs/TEAM_DISTRIBUTION.md).
+
+For a development computer, clone the selected modeling branch:
 
 ```powershell
 git clone --branch main https://github.com/ontron258/FreeCAD_SheetMetal.git 'D:\Source\FreeCAD_SheetMetal'

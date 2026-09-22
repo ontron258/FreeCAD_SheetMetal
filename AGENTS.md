@@ -49,14 +49,15 @@ modeling still works without it. Follow its AGENTS.md when changing the shared c
 
 The remotes have distinct roles:
 
-- `origin`: `ontron258/FreeCAD_SheetMetal`, the development fork.
+- `origin`: `ontron258/FreeCAD_SheetMetal`, the private production fork.
 - `upstream`: `shaise/FreeCAD_SheetMetal`, the official project.
 
 Branch conventions:
 
 - `master` mirrors `upstream/master`. Do not develop directly on it.
-- `main` is the default and integration branch for the complete local feature set.
-- `dev` is retained as a historical branch; continue integrated development on `main`.
+- `main` is the production branch for the complete local feature set. Develop on
+  focused branches and merge only after this repository's checks pass.
+- `dev` is retained as a historical branch and is not a production input.
 - Use focused topic branches when preparing isolated upstream contributions.
 - General collaboration now lives in the independent private repository
   `ontron258/FreeCAD_Collaboration` (local `C:\FreeCAD\FreeCAD_Collaboration`).
@@ -64,9 +65,15 @@ Branch conventions:
   The old feature branch preserves the extraction history; standalone installation
   uses its own Collaboration workbench and optional configured modeling addons.
 
+Production clients do not pull this branch directly. Distribution CI resolves
+the exact `main` commit from this and the other add-on repositories, records the
+full SHA, runs the cross-add-on checks and publishes one immutable team bundle.
+The server distributes that verified bundle; clients need no Git credentials.
+See Collaboration's `docs/TEAM_DISTRIBUTION.md` for the shared contract.
+
 Keep commits cohesive and independently understandable. In particular, avoid
 leaving verified changes only on disk: the user requests that code changes be
-committed and pushed to the corresponding development branch on `origin` after
+committed and pushed to the corresponding production branch on `origin` after
 verification, so the online fork remains a recovery copy. Stage only task-related
 files, use a normal non-force push, and report any authentication or push failure.
 In particular, avoid
